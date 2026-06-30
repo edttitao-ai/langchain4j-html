@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch18 · Observability · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">18</span>Observability(看得见 LLM 在做什么)</h1>
+    <p class="hero-sub">8 AI Service 事件 · 5 Listener 体系 · OpenTelemetry · Micrometer · Langfuse · 6 业务场景</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<strong>AI Service Observability(实验性)+ ChatModel/ModerationModel/Embedding/Store/Retriever Listener 5 套</strong> + <strong>OpenTelemetry GenAI 语义约定</strong>(标准 span/属性) + <strong>Micrometer 指标</strong>(Token/延迟/错误率) + <strong>Langfuse/Phoenix 等三方</strong> = LLM 应用"可观测、可回放、可统计、可告警"。⚠️ <strong>实验性 API,Semantic Conventions 还在演进</strong>。</p>
+
+<p><strong>⚠️ 限定</strong>:AI Service 可观测性<strong>仅 AI Services 适用</strong>(跟 ch17 Guardrails 一样);ChatModel Listener 适用于所有实现该接口的模型。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"咱们的 AI 客服上线 2 周,用户反馈'回答质量变差',但 LLM 厂商说他们的 API 没问题。Token 费也涨了 5 倍。怎么定位?"</p>
+
+<p><strong>解法</strong>:把每次 LLM 调用的 <strong>prompt / response / 耗时 / Token / 工具调用 / 错误</strong> 全部采集,接到监控平台。LangChain4j 提供 <strong>5 套 Listener 体系</strong>(AI Service / ChatModel / Moderation / Embedding / Store / Retriever),配合 <strong>OpenTelemetry</strong>(链路) + <strong>Micrometer</strong>(指标) + <strong>Langfuse</strong>(LLM 专用) 三件套。</p>
+
+<h3>6 个 Observability 能解决的事</h3>
+<ul>
+  <li><strong>💰 Token 成本失控</strong> — 某用户发了 1 万字 prompt,一晚上烧掉 $200,Langfuse 一查定位到,加 maxInputTokens 限制</li>
+  <li><strong>🐌 慢请求定位</strong> — 用户报"我的请求超时",OTel 链路图显示是 Embedding 检索慢(数据库索引没建)而非 LLM</li>
+  <li><strong>🎯 幻觉排查</strong> — 客服 Bot 答错,Langfuse 选中那条 trace,看到完整 prompt + 检索到的文档,5 秒复现</li>
+  <li><strong>📉 质量趋势</strong> — 用户 thumbs down 标记到 Langfuse,运营每周拉 bad case 改 prompt</li>
+  <li><strong>🚨 错误告警</strong> — Prometheus 配告警规则,LLM 错误率 > 5% 立刻发飞书/Slack</li>
+  <li><strong>📊 容量规划</strong> — Micrometer 看 QPS + P99 延迟,提前 1 个月扩容,不会上线当天被打爆</li>
+</ul>
+
+<p><strong>💡 什么时候不需要</strong>:本地 demo、一次性脚本、个人玩具 —— 不需要。但凡上线给 ≥ 2 个用户用,<strong>至少加 ChatModelListener 记录 prompt/response</strong>(5 分钟搞定,出问题救你一命)。</p>
+
+<blockquote class="mihuang">
+  <strong>口诀</strong>:观测三件套 = <strong>Logs(查一次)+ Metrics(看趋势)+ Traces(定位慢在哪)</strong>。Listener 是入口,OTel 是骨架,Micrometer 是肌肉,Langfuse 是大脑(LLM 专用语义)。早期 ChatModelListener + 日志就够,中型加 Langfuse,企业级上 OTel + Prometheus + Grafana 全套。
+</blockquote>
+
+<h2>2. 三大支柱(Logs / Metrics / Traces)</h2>
+
+<table>
+<thead><tr><th>支柱</th><th>内容</th><th>工具链</th><th>解决什么问题</th></tr></thead>
+<tbody>
+<tr><td><strong>Logs 日志</strong></td><td>每次调用的 prompt、response、tool calls(可重放)</td><td>SLF4J + logback + Langfuse</td><td>"刚才那次回答是什么?"</td></tr>
+<tr><td><strong>Metrics 指标</strong></td><td>Token 用量、延迟、错误率、QPS(P50/P95/P99)</td><td>Micrometer + Prometheus + Grafana</td><td>"这一周延迟涨了吗?"</td></tr>
+<tr><td><strong>Traces 链路</strong></td><td>跨服务调用链,定位慢在哪一段</td><td>OpenTelemetry + Jaeger / Tempo / Datadog / 阿里云 ARMS</td><td>"这个请求哪一段慢?"</td></tr>
+</tbody>
+</table>
+
+<p><strong>三者关系</strong>:1 次 LLM 调用会同时产生 1 条 trace(链路)+ 若干 metric(Token/延迟/错误)+ N 行 log(prompt/response/工具)。三者<strong>用同一 invocationId 关联</strong>(LangChain4j 在 <code>InvocationContext.invocationId()</code> 暴露)。</p>
+
+<h2>3. 5 套 Listener 体系</h2>
+
+<p>LangChain4j 监听器分 5 大类,各管一段:</p>
+
+<table>
+<thead><tr><th>Listener 接口</th><th>监听对象</th><th>触发时机</th></tr></thead>
+<tbody>
+<tr><td><code>AiService*Listener</code></td><td>AI Service 整体(8 事件)</td><td>调用开始 / 每次 LLM 请求 / 响应 / 工具执行 / Guardrail / 错误 / 完成</td></tr>
+<tr><td><code>ChatModelListener</code></td><td>ChatModel(直接调用)</td><td>LLM 请求前 / 响应后 / 错误</td></tr>
+<tr><td><code>ModerationModelListener</code></td><td>ModerationModel</td><td>审查请求 / 响应 / 错误</td></tr>
+<tr><td><code>EmbeddingModelListener</code></td><td>EmbeddingModel</td><td>embed 请求 / 响应 / 错误</td></tr>
+<tr><td><code>EmbeddingStoreListener</code></td><td>EmbeddingStore</td><td>add/search 请求 / 响应 / 错误</td></tr>
+<tr><td><code>ContentRetrieverListener</code></td><td>ContentRetriever(RAG 检索)</td><td>retrieve 请求 / 响应 / 错误</td></tr>
+</tbody>
+</table>
+
+<p><strong>5 套接口签名统一</strong>:都是 <code>onRequest</code> / <code>onResponse</code> / <code>onError</code> 3 钩子,挂载方式都是 <code>.listeners(List.of(...))</code> 或 <code>.addListener(...)</code>。</p>
+
+<h2>4. AI Service 8 事件(实验性)</h2>
+
+<p>AI Service 调一次可能涉及<strong>多次 LLM 调用</strong>(有 Tools / Guardrails / RAG 时),8 个事件覆盖完整生命周期:</p>
+
+<table>
+<thead><tr><th>事件</th><th>触发时机</th><th>包含</th></tr></thead>
+<tbody>
+<tr><td><code>AiServiceStartedEvent</code></td><td>LLM 调用开始时</td><td>—</td></tr>
+<tr><td><code>AiServiceRequestIssuedEvent</code></td><td><strong>每次</strong>向 LLM 发请求前(单次 Service 调用可能多次)</td><td>system message / user message / tools / RAG 结果</td></tr>
+<tr><td><code>AiServiceResponseReceivedEvent</code></td><td><strong>每次</strong>收到 LLM 响应后</td><td>LLM 响应 + 对应请求</td></tr>
+<tr><td><code>AiServiceErrorEvent</code></td><td>LLM 调用失败时(替代 Response)</td><td>错误信息</td></tr>
+<tr><td><code>AiServiceCompletedEvent</code></td><td>LLM 调用成功完成时</td><td>调用结果</td></tr>
+<tr><td><code>ToolExecutedEvent</code></td><td><strong>每次</strong>工具调用完成后</td><td>工具请求 + 工具结果</td></tr>
+<tr><td><code>InputGuardrailExecutedEvent</code></td><td><strong>每次</strong>输入护栏执行完</td><td>输入 / 输出(成功/失败)/ 耗时</td></tr>
+<tr><td><code>OutputGuardrailExecutedEvent</code></td><td><strong>每次</strong>输出护栏执行完</td><td>输入 / 输出(success/failure/retry/reprompt)/ 耗时</td></tr>
+</tbody>
+</table>
+
+<p><strong>注意</strong>:</p>
+<ul>
+  <li><strong>单次 Service 调用可能多次触发 Request/Response/Guardrail/Tool</strong> —— 因为有工具循环 + 重试</li>
+  <li><strong>不保证一一对应</strong>:成功路径有 Request + Response + Completed;失败路径有 Request + Error(<strong>没有</strong> Response,也没有 Completed)</li>
+  <li><strong>实验性 API</strong> —— 大版本可能改(尤其事件名)</li>
+</ul>
+
+<h3>4.1 监听器实现示例</h3>
+
+<pre><code>import java.time.Instant;
+import java.util.Optional;
+import java.util.UUID;
+import dev.langchain4j.observability.api.event.AiServiceCompletedEvent;
+import dev.langchain4j.observability.api.listener.AiServiceCompletedListener;
+import dev.langchain4j.invocation.InvocationContext;
+
+public class MyAiServiceCompletedListener
+        implements AiServiceCompletedListener {
+
+    @Override
+    public void onEvent(AiServiceCompletedEvent event) {
+        InvocationContext ctx = event.invocationContext();
+
+        // 同一 invocation 的所有事件共享一个 invocationId
+        UUID invocationId = ctx.invocationId();
+        String interfaceName = ctx.interfaceName();
+        String methodName = ctx.methodName();
+        Object chatMemoryId = ctx.chatMemoryId();
+        Instant timestamp = ctx.timestamp();
+        Optional&lt;Object&gt; result = event.result();
+
+        // 这里做日志 / 发送到 Langfuse / 上报指标
+        log.info("AI Service completed: {}#{} inv={} mem={} result={}",
+            interfaceName, methodName, invocationId, chatMemoryId, result);
+    }
+}</code></pre>
+
+<h3>4.2 注册监听器</h3>
+
+<pre><code>// 1. 准备监听器
+MyAiServiceCompletedListener completedListener = new MyAiServiceCompletedListener();
+MyAiServiceErrorListener errorListener = new MyAiServiceErrorListener();
+
+// 2. AiServices builder 上注册
+var assistant = AiServices.builder(MyAssistant.class)
+    .chatModel(chatModel)
+    .registerListener(completedListener)   // ← 一次性注册单个
+    // 或:
+    .registerListeners(List.of(completedListener, errorListener))  // 批量
+    .build();</code></pre>
+
+<p><strong>怎么关联一次调用的所有事件</strong>:用 <code>InvocationContext.invocationId()</code> —— 它是 <code>UUID</code>,同一 Service 调用产生的所有事件(<code>Request</code> / <code>Response</code> / <code>Tool</code> / <code>Guardrail</code> / <code>Completed</code> / <code>Error</code>)共享同一个 ID。</p>
+
+<h3>4.3 自定义事件 + 自定义监听器</h3>
+
+<p>AI Service 观测能力设计为<strong>可扩展</strong>:</p>
+
+<ol>
+  <li>实现 <code>AiServiceEvent</code> 接口 → 定义自己的事件</li>
+  <li>实现 <code>AiServiceListener</code> 接口 → 定义自己的监听器</li>
+  <li>通过 <code>AiServiceListenerRegistrar.fireEvent(event)</code> 触发事件</li>
+  <li>注册自定义 <code>AiServiceListenerRegistrarFactory</code>(SPI) → 控制注册/触发</li>
+</ol>
+
+<p>普通业务用不到,除非做框架(类似 Quarkus 扩展)。</p>
+
+<h2>5. ChatModelListener(最常用)</h2>
+
+<p><strong>直接调 ChatModel 时</strong>也能挂监听器,3 个钩子:</p>
+
+<pre><code>import dev.langchain4j.model.chat.listener.ChatModelListener;
+import dev.langchain4j.model.chat.listener.ChatModelRequestContext;
+import dev.langchain4j.model.chat.listener.ChatModelResponseContext;
+import dev.langchain4j.model.chat.listener.ChatModelErrorContext;
+
+public class MyChatListener implements ChatModelListener {
+
+    @Override
+    public void onRequest(ChatModelRequestContext ctx) {
+        // 1. 请求阶段:打印 prompt / 模型 / 参数
+        var req = ctx.chatRequest();
+        log.info("→ LLM 调用 model={} temp={} topP={} msgs={}",
+            req.parameters().modelName(),
+            req.parameters().temperature(),
+            req.parameters().topP(),
+            req.messages().size());
+    }
+
+    @Override
+    public void onResponse(ChatModelResponseContext ctx) {
+        // 2. 响应阶段:关键指标
+        var resp = ctx.chatResponse();
+        var usage = resp.metadata().tokenUsage();
+        log.info("""
+            ← LLM 响应:
+              model:    {}
+              finish:   {}
+              耗时:     {}ms
+              input:    {} tokens
+              output:   {} tokens
+              total:    {} tokens
+            """,
+            resp.metadata().modelName(),
+            resp.metadata().finishReason(),
+            ctx.requestTimeElapsed().toMillis(),
+            usage.inputTokenCount(),
+            usage.outputTokenCount(),
+            usage.totalTokenCount()
+        );
+    }
+
+    @Override
+    public void onError(ChatModelErrorContext ctx) {
+        // 3. 错误阶段:告警 + 重试策略
+        log.error("LLM 调用失败,provider={} err={}",
+            ctx.modelProvider(), ctx.error().getMessage());
+        alertService.send("LLM 调用异常:" + ctx.error().getMessage());
+    }
+}</code></pre>
+
+<h3>5.1 挂载方式</h3>
+
+<pre><code>ChatModel model = OpenAiChatModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .modelName("gpt-4o-mini")
+    .listeners(List.of(
+        new MyChatListener(),          // 业务日志
+        new OpenTelemetryChatModelListener(otel),  // OTel 链路
+        new MicrometerMetricsChatModelListener(meterRegistry),  // Micrometer 指标
+        new LangfuseListener(langfuseConfig)  // Langfuse LLM 专用
+    ))
+    .build();</code></pre>
+
+<p><strong>4 个监听器一行挂载</strong>,开箱即用。</p>
+
+<h3>5.2 ChatModelListener 核心机制</h3>
+
+<table>
+<thead><tr><th>行为</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><strong>调用顺序</strong></td><td>按 <code>List</code> 迭代顺序,<strong>同步</strong>在同一线程</td></tr>
+<tr><td><strong>onRequest 触发</strong></td><td>每次 LLM 调用前调 1 次;若 LLM 内部 retry,<strong>不重复触发</strong></td></tr>
+<tr><td><strong>onResponse 触发</strong></td><td>成功后调 1 次(LLM 内部 retry 不重复)</td></tr>
+<tr><td><strong>onError 触发</strong></td><td>失败时调 1 次(同上,不重复)</td></tr>
+<tr><td><strong>异常处理</strong></td><td>listener 抛异常只记 WARN,<strong>不影响</strong>后续 listener 执行,不影响主流程</td></tr>
+<tr><td><strong>attributes map</strong></td><td>跨钩子(onRequest → onResponse / onError)传数据;跨 listener 传数据</td></tr>
+</tbody>
+</table>
+
+<h3>5.3 流式场景特殊行为</h3>
+
+<p><code>StreamingChatModel</code> 上挂 listener 时:</p>
+<ul>
+  <li><strong>onRequest 在调用线程触发</strong></li>
+  <li><strong>onResponse / onError 在<strong>不同线程</strong>触发</strong>(流式响应线程),线程上下文<strong>不自动传递</strong></li>
+  <li><strong>用 attributes map 传上下文</strong>(比如 tenantId、correlationId)</li>
+  <li><strong>onResponse 在 <code>onCompleteResponse</code> 之前触发</strong>;</li>
+  <li><strong>onError 在 <code>handler.onError</code> 之前触发</strong></li>
+</ul>
+
+<h3>5.4 attributes map + ChatRequestOptions</h3>
+
+<pre><code>// 1. listener 跨钩子传数据(测耗时)
+public class DurationListener implements ChatModelListener {
+    @Override
+    public void onRequest(ChatModelRequestContext ctx) {
+        ctx.attributes().put("startNanos", System.nanoTime());
+    }
+    @Override
+    public void onResponse(ChatModelResponseContext ctx) {
+        long start = (long) ctx.attributes().get("startNanos");
+        long duration = (System.nanoTime() - start) / 1_000_000;
+        log.info("LLM 调用耗时: {}ms", duration);
+    }
+}
+
+// 2. 跨调用传元数据(per-invocation)
+ChatRequestOptions options = ChatRequestOptions.builder()
+    .addListenerAttribute("tenantId", "tenant-123")     // 租户 ID
+    .addListenerAttribute("correlationId", "corr-456")  // 链路追踪 ID
+    .build();
+model.chat(chatRequest, options);</code></pre>
+
+<p><strong>关键</strong>:<code>ChatRequestOptions.listenerAttributes</code> <strong>只在 LangChain4j 链路用,不发给 LLM 厂商</strong>(避免敏感字段泄露到 OpenAI / Anthropic)。</p>
+
+<h2>6. ModerationModelListener</h2>
+
+<p>3 个钩子(同 ChatModel),适用于 <code>OpenAiModerationModel</code> / <code>MistralAiModerationModel</code> / <code>WatsonxModerationModel</code>:</p>
+
+<pre><code>ModerationModelListener listener = new ModerationModelListener() {
+    @Override
+    public void onRequest(ModerationModelRequestContext ctx) {
+        log.info("审查: {}", ctx.moderationRequest().texts());
+        ctx.attributes().put("startTime", System.currentTimeMillis());
+    }
+
+    @Override
+    public void onResponse(ModerationModelResponseContext ctx) {
+        boolean flagged = ctx.moderationResponse().moderation().flagged();
+        if (flagged) {
+            String text = ctx.moderationResponse().moderation().flaggedText();
+            alertService.send("Moderation 触发:" + text);
+        }
+        Long start = (Long) ctx.attributes().get("startTime");
+        log.info("审查耗时: {}ms", System.currentTimeMillis() - start);
+    }
+
+    @Override
+    public void onError(ModerationModelErrorContext ctx) {
+        log.error("Moderation 调用失败", ctx.error());
+    }
+};
+
+ModerationModel model = OpenAiModerationModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .listeners(List.of(listener))
+    .build();</code></pre>
+
+<h2>7. RAG Listener(Embedding/Store/Retriever)</h2>
+
+<p>3 套,接口签名一致:</p>
+
+<h3>7.1 EmbeddingModelListener</h3>
+
+<pre><code>import dev.langchain4j.model.embedding.listener.*;
+
+public class MyEmbeddingListener implements EmbeddingModelListener {
+    @Override
+    public void onRequest(EmbeddingModelRequestContext ctx) {
+        ctx.attributes().put("startNanos", System.nanoTime());
+    }
+    @Override
+    public void onResponse(EmbeddingModelResponseContext ctx) {
+        long duration = System.nanoTime() - (long) ctx.attributes().get("startNanos");
+        log.info("Embedding 耗时: {}ns token={}",
+            duration, ctx.response().tokenUsage().totalTokenCount());
+    }
+    @Override
+    public void onError(EmbeddingModelErrorContext ctx) {
+        log.error("Embedding 失败", ctx.error());
+    }
+}
+
+// 挂载:用 addListener
+EmbeddingModel observed = embeddingModel.addListener(new MyEmbeddingListener());
+observed.embed("hello");</code></pre>
+
+<h3>7.2 EmbeddingStoreListener</h3>
+
+<pre><code>public class MyStoreListener implements EmbeddingStoreListener {
+    @Override
+    public void onResponse(EmbeddingStoreResponseContext&lt;?&gt; ctx) {
+        // 注意:Search 响应才有 searchResult
+        if (ctx instanceof EmbeddingStoreResponseContext.Search&lt;?&gt; search) {
+            int hits = search.searchResult().matches().size();
+            log.info("向量检索命中: {} 条", hits);
+        }
+    }
+}
+
+// 挂载
+EmbeddingStore&lt;TextSegment&gt; observedStore =
+    embeddingStore.addListener(new MyStoreListener());
+// 用 observedStore 喂 EmbeddingStoreContentRetriever</code></pre>
+
+<h3>7.3 ContentRetrieverListener(RAG 端到端)</h3>
+
+<pre><code>public class MyRetrieverListener implements ContentRetrieverListener {
+    @Override
+    public void onRequest(ContentRetrieverRequestContext ctx) {
+        ctx.attributes().put("startNanos", System.nanoTime());
+    }
+    @Override
+    public void onResponse(ContentRetrieverResponseContext ctx) {
+        long duration = System.nanoTime() - (long) ctx.attributes().get("startNanos");
+        int n = ctx.contents().size();
+        log.info("RAG 检索耗时: {}ms 命中: {} 条", duration / 1_000_000, n);
+    }
+}
+
+// 挂载
+ContentRetriever observedRetriever =
+    contentRetriever.addListener(new MyRetrieverListener());</code></pre>
+
+<p><strong>💡 实战建议</strong>:挂 <code>ContentRetrieverListener</code> 测 RAG 端到端(查 + 检);不挂 <code>EmbeddingStoreListener</code>(噪音太多,每个 embedding 调一次都打 log 会爆)。</p>
+
+<h2>8. OpenTelemetry 集成(企业级标准)</h2>
+
+<p><strong>OpenTelemetry(OTel)= 业界标准链路追踪</strong>,Datadog / Jaeger / 阿里云 ARMS 都支持。LangChain4j 跟 OTel GenAI 语义约定对齐(span 名、属性命名)。</p>
+
+<h3>8.1 加依赖</h3>
+
+<pre><code>&lt;!-- pom.xml --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;dev.langchain4j&lt;/groupId&gt;
+    &lt;artifactId&gt;langchain4j-otel&lt;/artifactId&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;io.opentelemetry&lt;/groupId&gt;
+    &lt;artifactId&gt;opentelemetry-api&lt;/artifactId&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;io.opentelemetry&lt;/groupId&gt;
+    &lt;artifactId&gt;opentelemetry-exporter-otlp&lt;/artifactId&gt;
+&lt;/dependency&gt;</code></pre>
+
+<h3>8.2 配置 OTel(导出到 Jaeger/Datadog/ARMS)</h3>
+
+<pre><code>import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
+
+// 1. 配置 OTel SDK
+OpenTelemetry otel = OpenTelemetrySdk.builder()
+    .addSpanProcessor(BatchSpanProcessor.builder(
+        OtlpGrpcSpanExporter.builder()
+            .setEndpoint("http://otel-collector:4317")  // OTel Collector 地址
+            .build()
+    ).build())
+    .build();
+
+// 2. 一行挂载
+ChatModel model = OpenAiChatModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .modelName("gpt-4o-mini")
+    .listeners(List.of(new OpenTelemetryChatModelListener(otel)))
+    .build();</code></pre>
+
+<h3>8.3 效果:Jaeger 看到完整调用链</h3>
+
+<pre><code>HTTP POST /api/chat                       ← 业务入口
+  └─ Assistant.chat()                    ← AI Service
+      └─ LLM chat (300ms, 500 in, 200 out tokens)  ← ChatModel
+         └─ Embedding.embed() (50ms)     ← EmbeddingModel
+         └─ ContentRetriever.retrieve() (80ms)     ← RAG
+            └─ VectorStore.search() (30ms)          ← EmbeddingStore</code></pre>
+
+<p><strong>业务价值</strong>:30 秒定位"为什么这个请求慢"。</p>
+
+<h3>8.4 OpenTelemetry GenAI 语义约定(属性)</h3>
+
+<p>LangChain4j 输出的 span 属性遵循 <a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">OTel GenAI Semantic Conventions</a>:</p>
+
+<table>
+<thead><tr><th>阶段</th><th>属性</th><th>例子</th></tr></thead>
+<tbody>
+<tr><td><strong>Request</strong></td><td><code>gen_ai.request.model</code></td><td><code>gpt-4o-mini</code></td></tr>
+<tr><td></td><td><code>gen_ai.request.temperature</code></td><td><code>0.7</code></td></tr>
+<tr><td></td><td><code>gen_ai.request.max_tokens</code></td><td><code>2000</code></td></tr>
+<tr><td><strong>Response</strong></td><td><code>gen_ai.response.model</code></td><td><code>gpt-4o-mini-2024-07-18</code></td></tr>
+<tr><td></td><td><code>gen_ai.response.finish_reasons</code></td><td><code>["stop"]</code></td></tr>
+<tr><td></td><td><code>gen_ai.usage.input_tokens</code> / <code>output_tokens</code></td><td><code>508</code> / <code>53</code></td></tr>
+<tr><td><strong>通用</strong></td><td><code>gen_ai.provider.name</code></td><td><code>openai</code></td></tr>
+<tr><td></td><td><code>gen_ai.operation.name</code></td><td><code>chat</code></td></tr>
+</tbody>
+</table>
+
+<p><strong>⚠️ 注意</strong>:Semantic Conventions 还在演进,v1.39 起有,但<strong>不算稳定</strong>。升级 OTel SDK 时要确认约定是否变了。</p>
+
+<h2>9. Micrometer 指标(企业级监控)</h2>
+
+<p>LangChain4j 提供 <code>langchain4j-micrometer-metrics</code> 模块,<strong>指标命名遵循 OTel GenAI Metrics 约定</strong>(v1.39.0+)。</p>
+
+<h3>9.1 加依赖</h3>
+
+<pre><code>&lt;!-- pom.xml --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;dev.langchain4j&lt;/groupId&gt;
+    &lt;artifactId&gt;langchain4j-micrometer-metrics&lt;/artifactId&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;io.micrometer&lt;/groupId&gt;
+    &lt;artifactId&gt;micrometer-registry-prometheus&lt;/artifactId&gt;
+&lt;/dependency&gt;</code></pre>
+
+<h3>9.2 创建监听器(一行)</h3>
+
+<pre><code>import dev.langchain4j.micrometer.metrics.listeners.MicrometerMetricsChatModelListener;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+
+// 1. 创建 MeterRegistry(Spring Boot 自动配,这里用 Simple 演示)
+MeterRegistry meterRegistry = new SimpleMeterRegistry();
+
+// 2. 创建 listener(一行)
+MicrometerMetricsChatModelListener listener =
+    new MicrometerMetricsChatModelListener(meterRegistry);
+
+// 3. 挂载
+ChatModel chatModel = AzureOpenAiChatModel.builder()
+    .endpoint(System.getenv("AZURE_OPENAI_ENDPOINT"))
+    .apiKey(System.getenv("AZURE_OPENAI_KEY"))
+    .deploymentName(System.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"))
+    .listeners(List.of(listener))
+    .build();
+
+// 4. 用法照常,指标自动采集
+chatModel.chat(ChatRequest.builder()
+    .messages(UserMessage.from("Hello!"))
+    .build());</code></pre>
+
+<h3>9.3 核心指标</h3>
+
+<table>
+<thead><tr><th>指标</th><th>类型</th><th>说明</th><th>关键 Tag</th></tr></thead>
+<tbody>
+<tr><td><code>gen_ai.client.token.usage</code></td><td>Histogram</td><td>每次请求 input/output token 数</td><td><code>gen_ai.token.type</code> = input/output</td></tr>
+<tr><td><code>gen_ai.client.operation.duration</code></td><td>Histogram</td><td>每次 chat 操作耗时</td><td><code>gen_ai.request.model</code> / <code>outcome</code></td></tr>
+</tbody>
+</table>
+
+<p><strong>Tag 维度</strong>:</p>
+<ul>
+  <li><code>gen_ai.operation.name</code> = <code>chat</code></li>
+  <li><code>gen_ai.provider.name</code> = <code>openai</code> / <code>azure.ai.inference</code> / <code>anthropic</code></li>
+  <li><code>gen_ai.request.model</code> = 请求中模型(<code>gpt-4</code>)</li>
+  <li><code>gen_ai.response.model</code> = 响应中模型(<code>gpt-4-0613</code>)</li>
+  <li><code>gen_ai.token.type</code> = <code>input</code> / <code>output</code></li>
+  <li><code>outcome</code> = <code>SUCCESS</code> / <code>ERROR</code></li>
+</ul>
+
+<h3>9.4 实战 Micrometer 监听器(完全自定义)</h3>
+
+<p>不依赖官方 listener,自己写一个:</p>
+
+<pre><code>public class MetricsChatListener implements ChatModelListener {
+
+    private final MeterRegistry registry;
+
+    public MetricsChatListener(MeterRegistry registry) {
+        this.registry = registry;
+        // 预注册指标
+        registry.counter("llm.requests.total", "model", "gpt-4o-mini");
+        registry.counter("llm.tokens.input.total");
+        registry.counter("llm.tokens.output.total");
+        registry.counter("llm.errors.total");
+        registry.timer("llm.call.duration");
+    }
+
+    @Override
+    public void onResponse(ChatModelResponseContext ctx) {
+        var usage = ctx.chatResponse().metadata().tokenUsage();
+        registry.counter("llm.tokens.input.total")
+            .increment(usage.inputTokenCount());
+        registry.counter("llm.tokens.output.total")
+            .increment(usage.outputTokenCount());
+        registry.timer("llm.call.duration")
+            .record(ctx.requestTimeElapsed());
+    }
+
+    @Override
+    public void onError(ChatModelErrorContext ctx) {
+        registry.counter("llm.errors.total").increment();
+    }
+}</code></pre>
+
+<p><strong>挂到 Spring Boot</strong>:</p>
+
+<pre><code>@Configuration
+public class ObservabilityConfig {
+
+    @Bean
+    public ChatModel chatModel(@Value("${openai.key}") String key,
+                               MeterRegistry registry) {
+        return OpenAiChatModel.builder()
+            .apiKey(key)
+            .modelName("gpt-4o-mini")
+            .listeners(List.of(
+                new MetricsChatListener(registry),                  // ① Prometheus
+                new OpenTelemetryChatModelListener(otel),           // ② OTel 链路
+                new LangfuseListener(langfuseConfig),               // ③ Langfuse
+                new BusinessChatLogger()                            // ④ 业务日志
+            ))
+            .build();
+    }
+}</code></pre>
+
+<h2>10. Langfuse 集成(LLM 专用监控)</h2>
+
+<p><strong>Langfuse = 专为 LLM 应用设计的开源监控平台</strong>,比 OTel 多提供:</p>
+<ul>
+  <li>✅ Prompt / Response 完整记录 + 可视化</li>
+  <li>✅ 成本统计(按模型 / 用户)</li>
+  <li>✅ 用户反馈收集(thumbs up/down)</li>
+  <li>✅ 慢请求分析</li>
+  <li>✅ 自定义评分</li>
+  <li>✅ <strong>可 self-host</strong>(数据不出公司)</li>
+</ul>
+
+<h3>10.1 部署(Docker 一行起)</h3>
+
+<pre><code>git clone https://github.com/langfuse/langfuse
+cd langfuse
+docker compose up -d
+# UI: http://localhost:3000</code></pre>
+
+<h3>10.2 接入</h3>
+
+<pre><code>&lt;dependency&gt;
+    &lt;groupId&gt;dev.langchain4j&lt;/groupId&gt;
+    &lt;artifactId&gt;langchain4j-langfuse&lt;/artifactId&gt;
+&lt;/dependency&gt;</code></pre>
+
+<pre><code>import dev.langchain4j.langfuse.LangfuseListener;
+import dev.langchain4j.langfuse.LangfuseConfiguration;
+
+LangfuseConfiguration config = LangfuseConfiguration.builder()
+    .url("http://localhost:3000")
+    .publicKey("pk-lf-***")
+    .secretKey("sk-lf-***")
+    .build();
+
+ChatModel model = OpenAiChatModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .listeners(List.of(new LangfuseListener(config)))   // 一行接入
+    .build();</code></pre>
+
+<h3>10.3 Langfuse UI 看到什么</h3>
+
+<ul>
+  <li>每次调用的完整 prompt + response</li>
+  <li>Token 用量 + 成本估算(按模型官方价)</li>
+  <li>耗时 + 工具调用列表</li>
+  <li>用户反馈(thumbs up/down)</li>
+  <li>自定义评分(运营审核)</li>
+</ul>
+
+<p><strong>业务价值</strong>:找出"最贵"的 10 个用户 / 10 个 prompt;发现"幻觉"case(收集反馈训练);改 prompt 后对比质量分数。</p>
+
+<h2>11. 决策树(用哪个?)</h2>
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 580" style="max-width:100%;height:auto;background:#0f172a;border-radius:12px;padding:20px;">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+  </defs>
+
+  <text x="450" y="30" text-anchor="middle" fill="#f1f5f9" font-size="20" font-weight="bold">
+    Observability 选型决策树(按项目阶段)
+  </text>
+
+  <!-- 起点 -->
+  <rect x="350" y="60" width="200" height="50" rx="8" fill="url(#g1)"/>
+  <text x="450" y="92" text-anchor="middle" fill="white" font-size="15" font-weight="bold">你的项目阶段?</text>
+
+  <line x1="450" y1="110" x2="450" y2="140" stroke="#94a3b8" stroke-width="2"/>
+
+  <!-- 分支 1: 早期 -->
+  <line x1="200" y1="140" x2="700" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="150" y1="140" x2="150" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="140" x2="450" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="140" x2="750" y2="170" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="30" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <text x="150" y="195" text-anchor="middle" fill="#10b981" font-size="14" font-weight="bold">早期 / 个人项目</text>
+  <text x="150" y="215" text-anchor="middle" fill="#cbd5e1" font-size="12">ChatModelListener + 日志</text>
+
+  <rect x="330" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#06b6d4" stroke-width="2"/>
+  <text x="450" y="195" text-anchor="middle" fill="#06b6d4" font-size="14" font-weight="bold">中型 / 团队</text>
+  <text x="450" y="215" text-anchor="middle" fill="#cbd5e1" font-size="12">+ Langfuse(prompt 反馈)</text>
+
+  <rect x="630" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#a855f7" stroke-width="2"/>
+  <text x="750" y="195" text-anchor="middle" fill="#a855f7" font-size="14" font-weight="bold">企业级 / 生产</text>
+  <text x="750" y="215" text-anchor="middle" fill="#cbd5e1" font-size="12">+ OTel + Prometheus + Grafana</text>
+
+  <!-- 落地 -->
+  <line x1="150" y1="230" x2="150" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="230" x2="450" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="230" x2="750" y2="260" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="50" y="260" width="200" height="80" rx="6" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="150" y="285" text-anchor="middle" fill="#10b981" font-size="12" font-weight="bold">挂载</text>
+  <text x="150" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">.listeners(List.of(</text>
+  <text x="150" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">  MyChatListener()</text>
+  <text x="150" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">))</text>
+
+  <rect x="350" y="260" width="200" height="80" rx="6" fill="#0f172a" stroke="#06b6d4" stroke-width="1"/>
+  <text x="450" y="285" text-anchor="middle" fill="#06b6d4" font-size="12" font-weight="bold">挂载</text>
+  <text x="450" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">.listeners(List.of(</text>
+  <text x="450" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">  LangfuseListener</text>
+  <text x="450" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">)</text>
+
+  <rect x="650" y="260" width="200" height="80" rx="6" fill="#0f172a" stroke="#a855f7" stroke-width="1"/>
+  <text x="750" y="285" text-anchor="middle" fill="#a855f7" font-size="12" font-weight="bold">挂载</text>
+  <text x="750" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">.listeners(List.of(</text>
+  <text x="750" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">  OTel, Micrometer,</text>
+  <text x="750" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">  Langfuse))</text>
+
+  <!-- 业务闭环 -->
+  <rect x="50" y="380" width="800" height="80" rx="8" fill="url(#g2)"/>
+  <text x="450" y="410" text-anchor="middle" fill="white" font-size="14" font-weight="bold">业务闭环(3 阶段迭代)</text>
+  <text x="450" y="435" text-anchor="middle" fill="white" font-size="12">用户反馈 (thumbs down) → 运营审核 bad case → 改 prompt / 加 Guardrail / 加文档</text>
+  <text x="450" y="453" text-anchor="middle" fill="white" font-size="12">→ A/B 测试对比质量 → 灰度发布 → 看 Langfuse 评分变化</text>
+
+  <!-- 工具矩阵 -->
+  <rect x="50" y="490" width="800" height="70" rx="6" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
+  <text x="450" y="515" text-anchor="middle" fill="#f1f5f9" font-size="13" font-weight="bold">5 套 Listener 体系(各管一段)</text>
+  <text x="450" y="535" text-anchor="middle" fill="#cbd5e1" font-size="11">AI Service(8 事件 / 整体) · ChatModel(LLM 直调) · Moderation(审查) · Embedding · EmbeddingStore · ContentRetriever</text>
+  <text x="450" y="552" text-anchor="middle" fill="#cbd5e1" font-size="11">接口签名统一 3 钩子:onRequest / onResponse / onError</text>
+</svg>
+
+<h2>12. 5 个避坑</h2>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 1:把 listener 抛的异常当成主流程失败</strong><br>
+<strong>症状</strong>:自定义 <code>MyChatListener.onResponse()</code> 调外部告警 API 抛了 NPE,整个 LLM 调用失败,用户看到 500。<br>
+<strong>根因</strong>:误以为 listener 抛异常会"冒泡"。<br>
+<strong>修法</strong>:官方明确 —— <strong>listener 抛异常只记 WARN,不影响后续 listener,不影响主流程</strong>。但你的业务逻辑该 try-catch 的还是要 try-catch,不要裸抛。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 2:流式场景下 listener 线程上下文丢失</strong><br>
+<strong>症状</strong>:<code>StreamingChatModel</code> 上挂 listener,<code>onResponse</code> 里想拿 <code>MDC.get("traceId")</code> 关联日志,结果是 null。<br>
+<strong>根因</strong>:<code>onResponse</code> 在<strong>不同线程</strong>触发,MDC 没自动传。<br>
+<strong>修法</strong>:在 <code>onRequest</code> 里 <code>ctx.attributes().put("traceId", MDC.get("traceId"))</code>,在 <code>onResponse</code> 里取出来。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 3:把敏感字段通过 listenerAttributes 发给 LLM 厂商</strong><br>
+<strong>症状</strong>:用 <code>addListenerAttribute("userId", realUserId)</code> 传用户标识,LangChain4j 把它发到 OpenAI / Anthropic,触发隐私合规问题。<br>
+<strong>根因</strong>:误以为 <code>listenerAttributes</code> 会发给 LLM。<br>
+<strong>修法</strong>:官方明确 —— <strong>ChatRequestOptions.listenerAttributes 只在 LangChain4j 内部用,不发给 LLM 厂商</strong>。但<strong>其他 ChatRequest 字段</strong>(messages / metadata)会发。敏感字段别往 message 里塞。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 4:Langfuse / OTel 性能开销被低估</strong><br>
+<strong>症状</strong>:每个请求都同步等 Langfuse 上报完成,LLM 调用 + 100ms 延迟,日均 100 万请求就是 100000 秒(27 小时!)CPU 时间浪费。<br>
+<strong>根因</strong>:Langfuse / OTel 默认是<strong>异步批上报</strong>,但你可能在测试环境用同步 SDK,生产没切。<br>
+<strong>修法</strong>:
+<ul>
+  <li>OTel 用 <code>BatchSpanProcessor</code>(默认就是异步批)</li>
+  <li>Langfuse 用 <code>LangfuseClient</code> 异步 flush,别每次 <code>flushSync()</code></li>
+  <li>指标(Micrometer)也是异步采集,只暴露端点,不阻塞</li>
+</ul>
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 5:实验性 API 当稳定 API 用 + Semantic Conventions 漂移</strong><br>
+<strong>症状</strong>:升级 LangChain4j 1.x → 2.x,AI Service 事件类改名 / 字段改了;升级 OTel SDK,GenAI Semantic Conventions 改了,Prometheus 指标名变了,Grafana 仪表盘全废。<br>
+<strong>根因</strong>:AI Service Observability 明确"实验性";OTel GenAI Conventions 也明确"实验性,可能改"。<br>
+<strong>修法</strong>:
+<ul>
+  <li>监听器代码独立 <code>observability/</code> 包,升级只改这个包</li>
+  <li>大版本升级前先看 release notes 的 observability 章节</li>
+  <li>OTel Semantic Conventions 用 <a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">官方版本</a>(v1.39 起),别自己造</li>
+  <li>关键仪表盘加 changelog,Conventions 变了能定位</li>
+</ul>
+</div>
+
+<h2>13. 速查表</h2>
+
+<table>
+<thead><tr><th>项</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><strong>5 套 Listener</strong></td><td>AiService(8 事件) / ChatModel / ModerationModel / EmbeddingModel / EmbeddingStore / ContentRetriever</td></tr>
+<tr><td><strong>统一钩子</strong></td><td>onRequest / onResponse / onError</td></tr>
+<tr><td><strong>ChatModelListener 包</strong></td><td><code>dev.langchain4j.model.chat.listener</code></td></tr>
+<tr><td><strong>AiService 包(实验性)</strong></td><td><code>dev.langchain4j.observability.api</code></td></tr>
+<tr><td><strong>Embedding 包</strong></td><td><code>dev.langchain4j.model.embedding.listener</code></td></tr>
+<tr><td><strong>Store 包</strong></td><td><code>dev.langchain4j.store.embedding.listener</code></td></tr>
+<tr><td><strong>Retriever 包</strong></td><td><code>dev.langchain4j.rag.content.retriever.listener</code></td></tr>
+<tr><td><strong>OTel 集成模块</strong></td><td><code>dev.langchain4j:langchain4j-otel</code></td></tr>
+<tr><td><strong>Micrometer 模块</strong></td><td><code>dev.langchain4j:langchain4j-micrometer-metrics</code></td></tr>
+<tr><td><strong>Langfuse 模块</strong></td><td><code>dev.langchain4j:langchain4j-langfuse</code></td></tr>
+<tr><td><strong>Observation 模块(高级)</strong></td><td><code>dev.langchain4j:langchain4j-observation</code>(Micrometer Observation API)</td></tr>
+<tr><td><strong>AI Service 事件数</strong></td><td>8 个(Started / Request / Response / Error / Completed / Tool / InputGuardrail / OutputGuardrail)</td></tr>
+<tr><td><strong>OTel 核心属性</strong></td><td><code>gen_ai.operation.name</code> / <code>gen_ai.provider.name</code> / <code>gen_ai.request.model</code> / <code>gen_ai.usage.input_tokens</code></td></tr>
+<tr><td><strong>Micrometer 核心指标</strong></td><td><code>gen_ai.client.token.usage</code>(Histogram)/ <code>gen_ai.client.operation.duration</code>(Histogram)</td></tr>
+<tr><td><strong>attributes map 作用</strong></td><td>跨 onRequest → onResponse/onError 传数据;跨 listener 传数据</td></tr>
+<tr><td><strong>listenerAttributes 作用</strong></td><td>per-invocation 元数据(tenantId / correlationId),<strong>不发给 LLM 厂商</strong></td></tr>
+<tr><td><strong>关键约束</strong></td><td>listener 抛异常只记 WARN;listener 同步执行,顺序按 List 迭代;流式 onResponse 在不同线程</td></tr>
+<tr><td><strong>Semantic Conventions 状态</strong></td><td>⚠️ 实验性,v1.39 起,大版本可能改</td></tr>
+<tr><td><strong>第三方 starter</strong></td><td><code>otel-genai-bridges</code>(社区,自动包装 ChatModel bean)</td></tr>
+<tr><td><strong>Phoenix(替代)</strong></td><td>Arize Phoenix 开源 LLM 可观测平台</td></tr>
+</tbody>
+</table>
+
+<h2>14. 本章小结</h2>
+
+<ul>
+  <li><strong>5 套 Listener 体系</strong>:AI Service(8 事件)/ ChatModel / Moderation / Embedding / Store / Retriever,统一 3 钩子</li>
+  <li><strong>观测三件套</strong>:Logs(查一次)+ Metrics(看趋势)+ Traces(定位慢在哪)</li>
+  <li><strong>Listener 是入口</strong>,OTel 是骨架,Micrometer 是肌肉,Langfuse 是大脑(LLM 专用语义)</li>
+  <li><strong>attributes map 跨钩子传</strong>(<code>startNanos</code> 测耗时);<strong>listenerAttributes 跨调用传</strong>(tenantId),<strong>不发 LLM</strong></li>
+  <li><strong>早期</strong>:ChatModelListener + 日志;<strong>中型</strong>:+ Langfuse;<strong>企业</strong>:+ OTel + Micrometer + Prometheus + Grafana</li>
+  <li><strong>实验性 API</strong>:AI Service Observability + OTel GenAI Semantic Conventions 都标"实验性",大版本可能改</li>
+</ul>
+
+<blockquote class="mihuang">
+  <strong>一句话总结</strong>:Observability 不是"上线出问题再补",而是"上线前 1 天挂 listener,出问题 5 分钟定位"。L1 必备:ChatModelListener + 业务日志;L2 进阶:Langfuse(prompt 反馈循环);L3 企业:OTel + Micrometer + Prometheus + Grafana(全栈三件套)。
+</blockquote>
+
+</main>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

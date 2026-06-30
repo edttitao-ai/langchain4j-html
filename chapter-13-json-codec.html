@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch13 · JSON Codec · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">13</span>JSON 编解码器(别碰,除非你真的需要)</h1>
+    <p class="hero-sub">Jackson 默认 + SPI 可换 + 5 业务场景 + ServiceLoader 机制</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<code>Jackson</code> 默认 + <code>JsonCodecFactory</code> SPI(Java Service Provider Interface) + <code>META-INF/services/</code> 声明式替换 = 99% 场景你<strong>不用碰这章</strong>。只有 Jackson 依赖冲突/自定义日期格式/多态序列化时才需要改。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"咱们的 LLM Tools 输出用了 Jackson,但 JetBrains 插件市场报 <code>ClassNotFoundException: com.fasterxml.jackson.databind.ObjectMapper</code>。怎么让 LangChain4j 换成 Gson?"</p>
+
+<p><strong>解法</strong>:LangChain4j 把 JSON 序列化做成 <strong>SPI(Java Service Provider Interface)</strong>。你实现一个 <code>JsonCodecFactory</code> 接口,在 <code>META-INF/services/dev.langchain4j.spi.json.JsonCodecFactory</code> 文件里指明实现类,LangChain4j 会通过 <strong>ServiceLoader</strong> 自动加载它,代替默认 Jackson。</p>
+
+<h3>5 个 JSON Codec 能解决的事</h3>
+<ul>
+  <li><strong>💥 依赖冲突</strong> — IntelliJ/Android/某些受限沙箱环境里 Jackson 与宿主框架版本冲突,换成 Gson / Moshi / 自家实现</li>
+  <li><strong>📅 日期格式</strong> — 默认 Jackson 序列化 <code>LocalDateTime</code> 是 timestamp 数组(<code>[2026,6,20,14,30]</code>),某些 LLM 看不懂;改成 <code>"2026-06-20T14:30"</code></li>
+  <li><strong>🎭 多态序列化</strong> — Tool 参数是 <code>Animal</code>(接口),实际传入 <code>Dog</code> / <code>Cat</code>,加 <code>@JsonTypeInfo</code> 加类型字段让 LLM 看懂</li>
+  <li><strong>🔐 敏感字段</strong> — 用户手机号/身份证在 JSON 输出时自动脱敏(<code>***MASKED***</code>),无需手动 toString</li>
+  <li><strong>⚡ 性能优化</strong> — Jackson 默认启用所有模块,某些场景下关闭特性 / 改用 <code>afterburner</code> 模块可提速 30%+</li>
+</ul>
+
+<p><strong>💡 99% 场景你不用看这章</strong>:LangChain4j 内置的 <code>JacksonJsonCodec</code>(在 <code>dev.langchain4j.internal</code> 包)已经覆盖绝大多数场景。除非上面 5 条命中你,否则别动这章。</p>
+
+<blockquote class="mihuang">
+  <strong>口诀</strong>:能用默认就用默认,SPI 改动是 last resort;改之前先看官方 internal 源码,改之后必须 5 场景回归测试。
+</blockquote>
+
+<h2>2. 核心机制</h2>
+
+<p>JSON Codec 在 LangChain4j 架构中的位置:</p>
+
+<pre><code>┌─────────────────────────────────────────────────────────┐
+│ LangChain4j 内部(Tools / Structured Outputs / RAG 元数据)│
+│   需要 JSON 序列化时,调 JsonCodec 接口                  │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────┐
+│ JsonCodec 接口(serialize / deserialize)                  │
+│   默认实现:JacksonJsonCodec(在 internal 包)             │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────┐
+│ JsonCodecFactory SPI(工厂模式)                            │
+│   create() → 返回 JsonCodec 实例                          │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────┐
+│ Java ServiceLoader(Java 1.6+ 标准 SPI 机制)             │
+│   扫 classpath:META-INF/services/dev.langchain4j.spi... │
+│   找到自定义工厂就替换默认 Jackson                          │
+└─────────────────────────────────────────────────────────┘</code></pre>
+
+<h3>2.1 什么是 SPI</h3>
+
+<p><strong>SPI(Service Provider Interface)</strong> 是 Java 标准的服务发现机制(<code>java.util.ServiceLoader</code>),规范三件事:</p>
+
+<ul>
+  <li><strong>接口</strong>:服务接口(这里是 <code>JsonCodecFactory</code>)</li>
+  <li><strong>实现</strong>:你写一个类实现接口</li>
+  <li><strong>声明</strong>:在 <code>META-INF/services/&lt;接口全限定名&gt;</code> 文件里写实现类 FQDN</li>
+</ul>
+
+<p><strong>LangChain4j 用了 SPI 后</strong>:用户替换实现,<strong>不改 LangChain4j 任何代码</strong>,符合开闭原则。</p>
+
+<h3>2.2 LangChain4j 默认的 Jackson 实现</h3>
+
+<table>
+<thead><tr><th>类</th><th>位置</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><code>JsonCodec</code></td><td><code>dev.langchain4j.spi.json</code></td><td>编解码接口(serialize / deserialize)</td></tr>
+<tr><td><code>JsonCodecFactory</code></td><td><code>dev.langchain4j.spi.json</code></td><td>工厂接口(create → JsonCodec)</td></tr>
+<tr><td><code>JacksonJsonCodec</code></td><td><code>dev.langchain4j.internal</code></td><td>LangChain4j 自带的 Jackson 实现(默认)</td></tr>
+</tbody>
+</table>
+
+<p><strong>⚠️ 注意</strong>:<code>JacksonJsonCodec</code> 在 <code>internal</code> 包 —— 官方忠告"这是内部使用",API 可能随时改。<strong>别直接 import 它</strong>(虽然能 import 到),正确做法是<strong>看它的源码作参考</strong>,自己实现 <code>JsonCodecFactory</code>。</p>
+
+<h2>3. 默认 Jackson 行为</h2>
+
+<p>LangChain4j 默认引入 <code>langchain4j-core</code>(传递依赖 <code>jackson-databind</code>)就自动用 Jackson。Tools 和 Structured Outputs 都依赖这个序列化器:</p>
+
+<pre><code>// pom.xml(默认就有)
+&lt;dependency&gt;
+    &lt;groupId&gt;dev.langchain4j&lt;/groupId&gt;
+    &lt;artifactId&gt;langchain4j-core&lt;/artifactId&gt;
+    &lt;version&gt;1.11.8-beta19&lt;/version&gt;
+&lt;/dependency&gt;
+// 它传递依赖:
+//   com.fasterxml.jackson.core:jackson-databind
+//   com.fasterxml.jackson.datatype:jackson-datatype-jsr310</code></pre>
+
+<p><strong>Tools 序列化示例</strong>(看默认行为):</p>
+<pre><code>// 你的 Tool 方法
+public class BookingTools {
+    @Tool
+    public BookingStatus checkBooking(@P("bookingNumber") String bookingNumber) {
+        return new BookingStatus(
+            bookingNumber,
+            LocalDateTime.of(2026, 6, 20, 14, 30),  // ← 默认 Jackson 序列化:
+            "CONFIRMED"                              //    [2026,6,20,14,30] 数组
+        );                                           //    不是 ISO 字符串!
+    }
+}
+
+// LLM 看到的 JSON(Tools 传给 LLM 时):
+// {"bookingNumber":"BK-001","bookingTime":[2026,6,20,14,30],"status":"CONFIRMED"}
+//                                            ↑ LLM 看不懂这个格式</code></pre>
+
+<p><strong>💡 这就是为什么要改</strong>:某些 LLM(尤其是小模型)看到数组时间会困惑,需要改成 <code>"2026-06-20T14:30:00"</code> 字符串。</p>
+
+<h2>4. 自定义步骤(3 步)</h2>
+
+<p>按官方文档的标准流程:</p>
+
+<h3>4.1 第 1 步:实现 <code>JsonCodecFactory</code></h3>
+
+<pre><code>// src/main/java/example/MyJsonCodecFactory.java
+package example;
+
+import dev.langchain4j.spi.json.JsonCodec;
+import dev.langchain4j.spi.json.JsonCodecFactory;
+
+public class MyJsonCodecFactory implements JsonCodecFactory {
+    @Override
+    public JsonCodec create() {
+        return new MyJsonCodec();   // 自己实现 JsonCodec
+    }
+}
+
+// JsonCodec 接口(简化)
+public interface JsonCodec {
+    String toJson(Object o);
+    &lt;T&gt; T fromJson(String json, Class&lt;T&gt; type);
+    &lt;T&gt; T fromJson(String json, TypeReference&lt;T&gt; typeRef);
+}</code></pre>
+
+<h3>4.2 第 2 步:实现 <code>JsonCodec</code></h3>
+
+<p>这里我们用一个"包装 Jackson + 自定义配置"模式:<strong>不重新发明轮子</strong>,复用 Jackson 但调整 ObjectMapper:</p>
+
+<pre><code>// src/main/java/example/MyJsonCodec.java
+package example;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import dev.langchain4j.spi.json.JsonCodec;
+
+public class MyJsonCodec implements JsonCodec {
+
+    private final ObjectMapper mapper;
+
+    public MyJsonCodec() {
+        this.mapper = new ObjectMapper()
+            .registerModule(new JavaTimeModule())                          // LocalDateTime 序列化
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)     // 禁用时间戳数组
+            .disable(SerializationFeature.FAIL_ON_EMPTY_BEANS)            // 空 bean 不报错
+            .enable(SerializationFeature.INDENT_OUTPUT);                  // 调试时可读
+    }
+
+    @Override
+    public String toJson(Object o) {
+        try {
+            return mapper.writeValueAsString(o);
+        } catch (Exception e) {
+            throw new RuntimeException("JSON 序列化失败", e);
+        }
+    }
+
+    @Override
+    public &lt;T&gt; T fromJson(String json, Class&lt;T&gt; type) {
+        try {
+            return mapper.readValue(json, type);
+        } catch (Exception e) {
+            throw new RuntimeException("JSON 反序列化失败", e);
+        }
+    }
+
+    @Override
+    public &lt;T&gt; T fromJson(String json, TypeReference&lt;T&gt; typeRef) {
+        try {
+            return mapper.readValue(json, typeRef);
+        } catch (Exception e) {
+            throw new RuntimeException("JSON 反序列化失败", e);
+        }
+    }
+}</code></pre>
+
+<h3>4.3 第 3 步:注册 SPI</h3>
+
+<p>在 <code>src/main/resources/META-INF/services/</code> 下创建文件:</p>
+
+<pre><code>📁 src/main/resources/
+└── 📁 META-INF/
+    └── 📁 services/
+        └── 📄 dev.langchain4j.spi.json.JsonCodecFactory
+
+文件内容(就一行,你的工厂类 FQDN):
+example.MyJsonCodecFactory</code></pre>
+
+<p><strong>文件名 = 接口全限定名,文件内容 = 实现类 FQDN</strong>。Java 的 <code>ServiceLoader.load(JsonCodecFactory.class)</code> 会扫描所有 classpath 里的这个文件。</p>
+
+<h2>5. 实战:换 Gson(完整示例)</h2>
+
+<p>假设你的项目已经重度依赖 Gson(比如和 Android 共享代码),不想引 Jackson,可以全部换 Gson:</p>
+
+<h3>5.1 加 Gson 依赖</h3>
+
+<pre><code>&lt;!-- pom.xml --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;com.google.code.gson&lt;/groupId&gt;
+    &lt;artifactId&gt;gson&lt;/artifactId&gt;
+    &lt;version&gt;2.11.0&lt;/version&gt;
+&lt;/dependency&gt;</code></pre>
+
+<h3>5.2 实现 Gson 版 JsonCodec</h3>
+
+<pre><code>// src/main/java/example/GsonJsonCodec.java
+package example;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.reflect.TypeToken;
+import dev.langchain4j.spi.json.JsonCodec;
+
+import java.lang.reflect.Type;
+
+public class GsonJsonCodec implements JsonCodec {
+
+    private final Gson gson;
+
+    public GsonJsonCodec() {
+        this.gson = new GsonBuilder()
+            .setDateFormat("yyyy-MM-dd'T'HH:mm:ss")    // ISO 格式
+            .serializeNulls()                          // null 字段也输出
+            .create();
+    }
+
+    @Override
+    public String toJson(Object o) {
+        return gson.toJson(o);
+    }
+
+    @Override
+    public &lt;T&gt; T fromJson(String json, Class&lt;T&gt; type) {
+        return gson.fromJson(json, type);
+    }
+
+    @Override
+    public &lt;T&gt; T fromJson(String json, TypeReference&lt;T&gt; typeRef) {
+        // TypeReference → Type 转换
+        Type type = typeRef.getType();
+        return gson.fromJson(json, type);
+    }
+}</code></pre>
+
+<h3>5.3 实现 Gson 版 Factory</h3>
+
+<pre><code>// src/main/java/example/GsonJsonCodecFactory.java
+package example;
+
+import dev.langchain4j.spi.json.JsonCodec;
+import dev.langchain4j.spi.json.JsonCodecFactory;
+
+public class GsonJsonCodecFactory implements JsonCodecFactory {
+    @Override
+    public JsonCodec create() {
+        return new GsonJsonCodec();
+    }
+}</code></pre>
+
+<h3>5.4 注册 SPI</h3>
+
+<pre><code># src/main/resources/META-INF/services/dev.langchain4j.spi.json.JsonCodecFactory
+example.GsonJsonCodecFactory</code></pre>
+
+<p><strong>生效时机</strong>:启动时 <code>ServiceLoader.load()</code> 自动加载,无需任何代码调用。从此 LangChain4j 内部所有 JSON 操作走你的 Gson 实现。</p>
+
+<h2>6. 实战:自定义 Jackson(ObjectMapper 配置)</h2>
+
+<p>这是最常见场景 ——<strong>不替换 Jackson,只是改 Jackson 配置</strong>(默认 JacksonJsonCodec 没法改 ObjectMapper)。</p>
+
+<h3>6.1 业务诉求</h3>
+
+<ul>
+  <li><code>LocalDateTime</code> 输出 ISO 字符串(给 LLM 看)</li>
+  <li><code>null</code> 字段不输出(减少 token 消耗)</li>
+  <li><code>BigDecimal</code> 不变科学计数法</li>
+  <li>未知字段不报错(LLM 可能加额外字段)</li>
+</ul>
+
+<h3>6.2 完整实现</h3>
+
+<pre><code>// src/main/java/example/CustomJacksonCodec.java
+package example;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.fasterxml.jackson.module.paramnames.ParameterNamesModule;
+import dev.langchain4j.spi.json.JsonCodec;
+
+import java.text.SimpleDateFormat;
+
+public class CustomJacksonCodec implements JsonCodec {
+
+    private final ObjectMapper mapper;
+
+    public CustomJacksonCodec() {
+        this.mapper = new ObjectMapper()
+            // 1️⃣ 注册模块
+            .registerModule(new JavaTimeModule())            // JSR-310(LocalDateTime 等)
+            .registerModule(new ParameterNamesModule())     // 构造函数参数名(Java 8+)
+
+            // 2️⃣ 时间格式
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)   // 不输出 timestamp 数组
+            .setDateFormat(new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss"))
+
+            // 3️⃣ null 字段不输出(省 token)
+            .setSerializationInclusion(JsonInclude.Include.NON_NULL)
+
+            // 4️⃣ 兼容 LLM 加的额外字段
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+
+            // 5️⃣ 大小写策略(LangChain4j 默认 camelCase,某些 LLM 输出 snake_case)
+            .setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE)
+
+            // 6️⃣ 空 bean 不报错
+            .disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
+    }
+
+    @Override
+    public String toJson(Object o) {
+        try { return mapper.writeValueAsString(o); }
+        catch (Exception e) { throw new RuntimeException("toJson 失败", e); }
+    }
+
+    @Override
+    public &lt;T&gt; T fromJson(String json, Class&lt;T&gt; type) {
+        try { return mapper.readValue(json, type); }
+        catch (Exception e) { throw new RuntimeException("fromJson(Class) 失败", e); }
+    }
+
+    @Override
+    public &lt;T&gt; T fromJson(String json, TypeReference&lt;T&gt; typeRef) {
+        try { return mapper.readValue(json, typeRef); }
+        catch (Exception e) { throw new RuntimeException("fromJson(TypeReference) 失败", e); }
+    }
+}</code></pre>
+
+<p><strong>6 段配置对应 6 个真实痛点</strong>。直接 copy 这个就能解决 80% 场景。</p>
+
+<h2>7. 实战:多态序列化</h2>
+
+<p>Tools 参数如果是接口/抽象类,JSON 序列化必须保留类型信息,否则 LLM 调用时反序列化失败。</p>
+
+<h3>7.1 业务诉求</h3>
+
+<pre><code>// Tool 方法签名
+@Tool
+public String processAnimal(Animal animal) { ... }
+
+// 接口
+public interface Animal {
+    String name();
+}
+
+// 两个实现
+public record Dog(String name, String breed) implements Animal {}
+public record Cat(String name, boolean indoor) implements Animal {}</code></pre>
+
+<p><strong>默认 Jackson 序列化</strong>:</p>
+<pre><code>// LLM 看到:
+{"name":"旺财"}                          // ❌ 没有类型信息!
+{"name":"小花","indoor":true}            // ❌ Jackson 自己猜</code></pre>
+
+<p><strong>问题</strong>:LLM 调用时,LangChain4j 反序列化回 <code>Animal</code>,Jackson 不知道是 <code>Dog</code> 还是 <code>Cat</code> → 报错。</p>
+
+<h3>7.2 解法:加 <code>@JsonTypeInfo</code></h3>
+
+<pre><code>// Animal 接口
+@JsonTypeInfo(
+    use = JsonTypeInfo.Id.NAME,           // 用类名作为类型字段
+    include = JsonTypeInfo.As.PROPERTY,
+    property = "type"                     // 类型字段名叫 "type"
+)
+@JsonSubTypes({
+    @JsonSubTypes.Type(value = Dog.class, name = "dog"),
+    @JsonSubTypes.Type(value = Cat.class, name = "cat")
+})
+public interface Animal {
+    String name();
+}</code></pre>
+
+<p><strong>序列化结果</strong>(LLM 能看懂):</p>
+<pre><code>{"type":"dog","name":"旺财","breed":"柴犬"}    // ✅ 完整类型信息
+{"type":"cat","name":"小花","indoor":true}    // ✅</code></pre>
+
+<p><strong>⚠️ 注意</strong>:<code>@JsonTypeInfo</code> 必须加在<strong>接口/抽象类</strong>上,不能加在实现类上。</p>
+
+<h3>7.3 自定义类型字段(改 name)</h3>
+
+<p>如果嫌 <code>type="dog"</code> 太长,可以自定义:</p>
+
+<pre><code>@JsonTypeInfo(
+    use = JsonTypeInfo.Id.CUSTOM,         // 自定义
+    property = "kind",
+    visible = true
+)
+@JsonTypeIdResolver(MyAnimalResolver.class)  // 自定义类
+public interface Animal { ... }
+
+// 自定义解析器
+public class MyAnimalResolver implements TypeIdResolver {
+    @Override
+    public String idFromValue(Object value) {
+        if (value instanceof Dog) return "D";
+        if (value instanceof Cat) return "C";
+        return value.getClass().getSimpleName();
+    }
+    // ... 其他方法略
+}</code></pre>
+
+<p><strong>序列化</strong>:<code>{"kind":"D","name":"旺财"}</code> —— 短但更难读,生产环境用默认 NAME 即可。</p>
+
+<h2>8. 选型决策树</h2>
+
+<svg viewBox="0 0 900 540" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;background:#f8fafc;border-radius:8px;padding:12px;">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 9 3, 0 6" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <!-- 根节点 -->
+  <rect x="350" y="20" width="200" height="50" rx="8" fill="#1e40af" stroke="#1e3a8a" stroke-width="2"/>
+  <text x="450" y="42" text-anchor="middle" font-size="14" font-weight="600" fill="white">需要自定义 JSON Codec?</text>
+  <text x="450" y="58" text-anchor="middle" font-size="11" fill="#dbeafe">99% 场景:不需要</text>
+
+  <!-- 左:不需要 -->
+  <rect x="60" y="120" width="200" height="45" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="160" y="140" text-anchor="middle" font-size="12" font-weight="600" fill="#1e40af">A. 默认 Jackson 即可</text>
+  <text x="160" y="156" text-anchor="middle" font-size="10" fill="#1e40af">99% 场景</text>
+
+  <line x1="400" y1="70" x2="180" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <rect x="40" y="190" width="240" height="42" rx="6" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="160" y="208" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">→ 直接用,关掉这章</text>
+  <text x="160" y="222" text-anchor="middle" font-size="9" fill="#065f46">JacksonJsonCodec 已覆盖绝大多数</text>
+
+  <line x1="160" y1="165" x2="160" y2="190" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 中:换 Gson -->
+  <rect x="350" y="120" width="200" height="45" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="450" y="140" text-anchor="middle" font-size="12" font-weight="600" fill="#92400e">B. 换 Gson / Moshi</text>
+  <text x="450" y="156" text-anchor="middle" font-size="10" fill="#92400e">依赖冲突 / Android</text>
+
+  <line x1="450" y1="70" x2="450" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <rect x="330" y="190" width="240" height="42" rx="6" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="450" y="208" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">→ 实现 GsonJsonCodecFactory + SPI</text>
+  <text x="450" y="222" text-anchor="middle" font-size="9" fill="#065f46">第 5 节完整示例</text>
+
+  <line x1="450" y1="165" x2="450" y2="190" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 右:自定义 Jackson -->
+  <rect x="640" y="120" width="200" height="45" rx="6" fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="740" y="140" text-anchor="middle" font-size="12" font-weight="600" fill="#5b21b6">C. 自定义 Jackson 配置</text>
+  <text x="740" y="156" text-anchor="middle" font-size="10" fill="#5b21b6">日期格式 / 多态 / 脱敏</text>
+
+  <line x1="500" y1="70" x2="720" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <rect x="620" y="190" width="240" height="42" rx="6" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="740" y="208" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">→ 包装 ObjectMapper + SPI</text>
+  <text x="740" y="222" text-anchor="middle" font-size="9" fill="#065f46">第 6 节 6 段配置</text>
+
+  <line x1="740" y1="165" x2="740" y2="190" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 第二层:是否多态 -->
+  <rect x="350" y="280" width="200" height="50" rx="8" fill="#7c3aed" stroke="#6d28d9" stroke-width="2"/>
+  <text x="450" y="302" text-anchor="middle" font-size="13" font-weight="600" fill="white">有多态序列化?</text>
+  <text x="450" y="318" text-anchor="middle" font-size="10" fill="#ede9fe">接口/抽象类作 Tool 参数</text>
+
+  <line x1="160" y1="232" x2="380" y2="280" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="450" y1="232" x2="450" y2="280" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="740" y1="232" x2="520" y2="280" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- 左:无多态 -->
+  <rect x="100" y="370" width="240" height="45" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="220" y="390" text-anchor="middle" font-size="12" font-weight="600" fill="#92400e">无 / 简单 POJO</text>
+  <text x="220" y="406" text-anchor="middle" font-size="10" fill="#92400e">默认 JacksonJsonCodec 够用</text>
+
+  <line x1="380" y1="305" x2="340" y2="370" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 右:有多态 -->
+  <rect x="560" y="370" width="240" height="45" rx="6" fill="#fecaca" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="680" y="390" text-anchor="middle" font-size="12" font-weight="600" fill="#7f1d1d">有 / 接口/抽象类</text>
+  <text x="680" y="406" text-anchor="middle" font-size="10" fill="#7f1d1d">必须 @JsonTypeInfo</text>
+
+  <line x1="520" y1="305" x2="560" y2="370" stroke="#dc2626" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- 终端:避坑 -->
+  <rect x="100" y="465" width="700" height="55" rx="8" fill="#1e3a8a" stroke="#1e40af" stroke-width="2"/>
+  <text x="450" y="488" text-anchor="middle" font-size="13" font-weight="600" fill="white">5 件套避坑</text>
+  <text x="450" y="506" text-anchor="middle" font-size="11" fill="#dbeafe">SPI 文件路径必须 META-INF/services/ | FQDN 不能拼错 | 不引用 internal 包 | 改完跑 5 场景回归 | 测试时打开 ServiceLoader 日志</text>
+
+  <line x1="220" y1="415" x2="280" y2="465" stroke="#10b981" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="680" y1="415" x2="620" y2="465" stroke="#10b981" stroke-width="1.5" marker-end="url(#arr)"/>
+</svg>
+
+<h2>9. 5 个避坑</h2>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 1:SPI 文件路径写错</strong><br>
+<strong>症状</strong>:实现类写完,SPI 文件也建了,但 LangChain4j 仍然用默认 Jackson。<br>
+<strong>根因</strong>:<code>META-INF/services/</code> 路径必须在 <code>src/main/resources/</code> 下,拼成 <code>META-INF/services/&lt;接口全限定名&gt;</code>(没有 .class 后缀)。<br>
+<strong>修法</strong>:检查编译后的 JAR 里有没有这个文件:<code>jar tf your.jar | grep META-INF/services</code>。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 2:FQDN 拼写错误</strong><br>
+<strong>症状</strong>:ServiceLoader 启动报 <code>ServiceConfigurationError</code>,整个 Spring Boot 启动失败。<br>
+<strong>根因</strong>:SPI 文件里写的类名跟实际类名不一致(常见大小写错、多空格、漏包名)。<br>
+<strong>修法</strong>:打开 JAR 里的 SPI 文件逐字核对 —— 一个空格都不能差。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 3:多 Jackson 版本冲突</strong><br>
+<strong>症状</strong>:你自己用的 <code>ObjectMapper</code> 是 2.17,LangChain4j 内部用的是 2.15,你的自定义 Codec 调到 internal Jackson 类时抛 <code>NoSuchMethodError</code>。<br>
+<strong>根因</strong>:Maven 多模块依赖,不同 transitive 把 Jackson 拉成多个版本。<br>
+<strong>修法</strong>:<code>&lt;dependencyManagement&gt;</code> 显式锁定 Jackson 版本到所有模块一致。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 4:直接 import JacksonJsonCodec(internal 包)</strong><br>
+<strong>症状</strong>:你代码里 <code>import dev.langchain4j.internal.JacksonJsonCodec;</code> 直接继承它,LangChain4j 下个版本改 internal 包,你的代码编译失败。<br>
+<strong>根因</strong>:<code>internal</code> 包按约定不保证 API 稳定。<br>
+<strong>修法</strong>:<strong>参考源码</strong>(看怎么配 ObjectMapper),但<strong>不要继承</strong>。自己实现 <code>JsonCodec</code> 接口。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 5:LocalDateTime 序列化 LLM 翻车</strong><br>
+<strong>症状</strong>:Tool 返回包含 <code>LocalDateTime</code>,LLM 收到 <code>[2026,6,20,14,30]</code> 数组,LLM 小模型不理解,调用下一轮 Tools 时报错。<br>
+<strong>根因</strong>:Jackson 默认 <code>WRITE_DATES_AS_TIMESTAMPS=true</code>,序列化 JSR-310 类型为数组。<br>
+<strong>修法</strong>:自定义 Codec 里 <code>disable(WRITE_DATES_AS_TIMESTAMPS)</code> + <code>registerModule(JavaTimeModule)</code>,输出 <code>"2026-06-20T14:30:00"</code>。
+</div>
+
+<blockquote class="mihuang">
+  <strong>口诀</strong>:默认能不动就不动,SPI 路径精确到字符,不引 internal 包,版本冲突显式锁,日期格式必改 ISO。
+</blockquote>
+
+<h2>10. 速查表</h2>
+
+<table>
+<thead><tr><th>需求</th><th>方案</th><th>位置</th></tr></thead>
+<tbody>
+<tr><td>默认 Jackson</td><td>什么都不做</td><td>LangChain4j 自动</td></tr>
+<tr><td>换 Gson</td><td>实现 <code>GsonJsonCodecFactory</code></td><td>META-INF/services/ 注册</td></tr>
+<tr><td>换 Moshi</td><td>实现 <code>MoshiJsonCodecFactory</code></td><td>同上</td></tr>
+<tr><td>改 Jackson 日期格式</td><td><code>disable(WRITE_DATES_AS_TIMESTAMPS)</code> + <code>JavaTimeModule</code></td><td>自定义 Codec</td></tr>
+<tr><td>多态序列化</td><td>接口上加 <code>@JsonTypeInfo</code></td><td>POJO 类</td></tr>
+<tr><td>空字段不输出</td><td><code>setSerializationInclusion(NON_NULL)</code></td><td>ObjectMapper</td></tr>
+<tr><td>兼容 LLM 额外字段</td><td><code>disable(FAIL_ON_UNKNOWN_PROPERTIES)</code></td><td>ObjectMapper</td></tr>
+<tr><td>大小写策略</td><td><code>setPropertyNamingStrategy(...)</code></td><td>ObjectMapper</td></tr>
+<tr><td>敏感字段脱敏</td><td>自定义 <code>JsonSerializer</code> + <code>@JsonSerialize(using=...)</code></td><td>字段注解</td></tr>
+<tr><td>SPI 文件位置</td><td><code>src/main/resources/META-INF/services/&lt;接口全限定名&gt;</code></td><td>resources</td></tr>
+</tbody>
+</table>
+
+<h2>11. 本章小结</h2>
+
+<ul>
+  <li><strong>默认 Jackson</strong>:<code>JacksonJsonCodec</code> 在 internal 包,99% 场景你不用碰</li>
+  <li><strong>SPI 替换三步</strong>:实现 <code>JsonCodecFactory</code> → 实现 <code>JsonCodec</code> → 写 <code>META-INF/services/</code> 文件</li>
+  <li><strong>常见动机</strong>:依赖冲突 / 日期格式 / 多态序列化 / 敏感脱敏 / 性能优化</li>
+  <li><strong>多态关键</strong>:接口上加 <code>@JsonTypeInfo</code>,LLM 才能看懂 <code>type="dog"</code></li>
+  <li><strong>5 避坑</strong>:SPI 路径 / FQDN 拼写 / Jackson 版本冲突 / 别引 internal 包 / 日期改 ISO</li>
+</ul>
+
+<hr>
+<p class="footer-src">📖 本章基于官方文档:<a href="file:///E:/hermes_chat/langchain4j-html/JSON%20Codec%20_LangChain4j.html">JSON Codec _ LangChain4j.html</a> 提炼 + 实战扩展 · 内容仅基于 LangChain4j 官方资料,不与其他框架混搭</p>
+
+</main>
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

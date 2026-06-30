@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lg02 · 子图 · LangGraph4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">02</span> 子图(Graph 嵌套 + 模块化 + 多智能体)</h1>
+    <p class="hero-sub">3 种添加方式 · 状态共享 · 中断 · 可视化 · 多智能体 / 团队协作 6 场景</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<strong>子图(Subgraph)= 用作另一个图的节点的图</strong>,本质是<strong>封装 + 组合</strong>。3 种添加方式 —— <strong>已编译子图作为节点</strong>(共享状态)/ <strong>作为节点操作</strong>(状态转换)/ <strong>作为状态子图合并</strong>(深度集成)。</p>
+
+<p><strong>核心价值</strong>:LangGraph4j 的子图机制把"大图拆小"做成一级概念 —— <strong>构建多智能体系统</strong>(多个 Agent 协作)+ <strong>跨图复用节点</strong>(子图在多个父图里跑)+ <strong>团队独立开发</strong>(按子图接口集成,互不耦合)。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"咱们的 AI 客服主图已经有 30 个节点了 —— 订单处理 / 退换货 / 物流查询 / 发票 / 投诉 5 大模块。新加一个'换货'功能要在主图里加 3 个节点 + 5 条边,每次都改主图。怎么拆?"</p>
+
+<p><strong>解法</strong>:用 <strong>子图</strong> 把 5 大模块拆成独立子图,主图只调 <code>addNode("order_subgraph", orderSubgraph)</code>。<strong>新增模块 = 加新子图,主图零改动</strong>。多团队协作:订单团队 / 物流团队各管各的子图,只约定<strong>输入输出 State key</strong>。</p>
+
+<h3>6 个子图能解决的事</h3>
+<ul>
+  <li><strong>🧩 大图拆小</strong> — 主图 30 节点 → 1 父图 + 5 子图,每个子图 ≤ 8 节点,复杂度指数级下降</li>
+  <li><strong>👥 多智能体协作</strong> — "订单 Agent" / "支付 Agent" / "物流 Agent" 各自是子图,主图协调</li>
+  <li><strong>♻️ 跨图复用</strong> — "用户认证子图"在登录 / 注册 / 改密码 / 注销 4 个父图里都用到,只写一次</li>
+  <li><strong>🏢 团队独立开发</strong> — 订单团队只管 <code>order_subgraph</code>,物流团队只管 <code>logistics_subgraph</code>,约定 State key 即可</li>
+  <li><strong>🔌 子图替换 / 升级</strong> — A/B 测试:同一父图,子图 v1 / v2 切换,看哪个效果更好</li>
+  <li><strong>🧪 子图独立测试</strong> — 子图单独 <code>.compile()</code> 测,不需要把整个父图拉起来</li>
+</ul>
+
+<p><strong>💡 什么时候不需要</strong>:图 < 10 节点 / 一次性脚本 / 单团队维护 / 没有"模块"概念 —— 直接平铺写,过度设计反而难维护。子图是"模块边界清晰 + 跨图复用 + 多团队"时的优化方案。</p>
+
+<blockquote class="mihuang">
+  <strong>口诀</strong>:<strong>子图 = 节点的图</strong>。3 种添加方式:<strong>已编译(共享 state)/ 作为节点操作(状态转换)/ 作为状态子图(深度合并)</strong>。<strong>默认用第 1 种(已编译子图),需要状态转换用第 2 种,需要深度集成用第 3 种</strong>。子图节点 <strong>忽略非共享 key</strong>(不会污染父图 State)。
+</blockquote>
+
+<h2>2. 3 种添加子图方式</h2>
+
+<table>
+<thead><tr><th>方式</th><th>API</th><th>何时用</th><th>状态共享</th></tr></thead>
+<tbody>
+<tr><td><strong>① 已编译子图作节点</strong></td><td><code>addNode("sub", workflowChild.compile())</code></td><td>父图 / 子图<strong>共享 state schema</strong></td><td>共享 key 通信</td></tr>
+<tr><td><strong>② 作为节点操作</strong></td><td><code>addNode("sub", (state) -&gt; ...stream(subgraph))</code></td><td>父图 / 子图<strong>状态模式不同</strong>,需转换</td><td>手动转换</td></tr>
+<tr><td><strong>③ 作为状态子图</strong></td><td><code>addNode("sub", workflowChild)</code>(未编译)</td><td>父图 / 子图<strong>紧密关联,共享所有</strong></td><td>完全共享</td></tr>
+</tbody>
+</table>
+
+<h2>3. 方式 ① 已编译子图作节点(最简单)</h2>
+
+<p><strong>前提</strong>:父图和子图状态模式<strong>至少共享一个 key</strong>。如果完全没有共享 key,要用方式 ②(节点操作)。</p>
+
+<pre><code>// 1. 定义子图
+var childBuilder = new StateGraph(ChildState.SCHEMA, ChildState::new)
+    .addNode("validate", node_async(state -&gt; {
+        String input = (String) state.value("input").orElse("");
+        return Map.of("valid", !input.isEmpty());
+    }))
+    .addNode("transform", node_async(state -&gt; {
+        String input = (String) state.value("input").orElse("");
+        return Map.of("output", input.toUpperCase());
+    }))
+    .addEdge(START, "validate")
+    .addConditionalEdges("validate",
+        edge_async(state -&gt; {
+            Boolean valid = (Boolean) state.value("valid").orElse(false);
+            return valid ? "valid" : "invalid";
+        }),
+        Map.of(
+            "valid", "transform",
+            "invalid", END
+        ))
+    .addEdge("transform", END);
+
+var compiledChild = childBuilder.compile();   // ← 先 compile 子图
+
+// 2. 父图添加子图节点
+var parentGraph = new StateGraph(ParentState.SCHEMA, ParentState::new)
+    .addNode("subgraph", compiledChild)        // ← 一行:已编译子图作节点
+    .addEdge(START, "subgraph")
+    .addEdge("subgraph", END)
+    .compile();</code></pre>
+
+<p><strong>2 个关键规则</strong>:</p>
+<ul>
+  <li><strong>父图 / 子图<strong>至少共享一个 key</strong></strong>才能通信(无共享 key → 用方式 ②)</li>
+  <li><strong>额外 key 被忽略</strong>:<strong>传给子图</strong>的额外 key(非共享)被忽略;<strong>子图返回</strong>的额外 key(父图没定义)被忽略</li>
+</ul>
+
+<h2>4. 方式 ② 作为节点操作(状态转换)</h2>
+
+<p>父图 / 子图<strong>状态模式完全不同</strong>时,用节点函数<strong>手动转换</strong>:</p>
+
+<pre><code>// 1. 子图(状态模式: input + result)
+StateGraph childGraph = new StateGraph(ChildState.SCHEMA, ChildState::new)
+    .addNode("substep1", node_async(state -&gt; {
+        String input = (String) state.value("input").orElse("");
+        return Map.of("result", "SubStep1:" + input);
+    }))
+    .addNode("substep2", node_async(state -&gt; {
+        String prev = (String) state.value("result").orElse("");
+        return Map.of("result", prev + "-&gt;SubStep2");
+    }))
+    .addEdge(START, "substep1")
+    .addEdge("substep1", "substep2")
+    .addEdge("substep2", END);
+
+CompiledGraph compiledChild = childGraph.compile();
+
+// 2. 父图中用 AsyncNodeActionWithConfig 调子图
+StateGraph parentGraph = new StateGraph(ParentState.SCHEMA, ParentState::new)
+    .addNode("subgraph", (state) -&gt; {
+        // 父图状态 → 子图状态
+        var input = Map.&lt;String, Object&gt;of(
+            "subgraphKey",
+            state.lastMessage().orElseThrow()
+        );
+
+        // 调子图(stream 是同步的,先消费再拿结果)
+        return compiledChild.stream(input)
+            .forEachAsync(System.out::println)
+            .thenApply(res -&gt; state.data());   // 子图结果 → 父图状态
+    })
+    .addEdge(START, "subgraph")
+    .addEdge("subgraph", END)
+    .compile();</code></pre>
+
+<p><strong>核心</strong>:节点函数负责<strong>双向转换</strong> —— 父→子(喂 input) + 子→父(拿 output)。</p>
+
+<div class="callout-warn">
+<strong>⚠️ 中断支持由你决定</strong>:作为节点操作的子图,<strong>中断逻辑由节点函数自己处理</strong>(不是自动),适合"完全掌控子图调用方式"的场景。
+</div>
+
+<h2>5. 方式 ③ 作为状态子图(深度合并)</h2>
+
+<p><strong>最紧密集成</strong> —— 子图<strong>合并到父图</strong>,成为不可分割的一部分。父图 / 子图<strong>共享所有内容</strong>(如单一图)。</p>
+
+<pre><code>// 子图(未编译)
+var childGraph = new StateGraph(ChildState.SCHEMA, ChildState::new)
+    .addNode("validate", node_async(state -&gt; ...))
+    .addNode("transform", node_async(state -&gt; ...))
+    .addEdge(START, "validate")
+    .addEdge("validate", "transform")
+    .addEdge("transform", END);
+
+// 父图直接 addNode(子图未编译版本) → 合并
+var parentGraph = new StateGraph(ParentState.SCHEMA, ParentState::new)
+    .addNode("subgraph", childGraph)            // ← 未编译
+    .addEdge(START, "subgraph")
+    .addEdge("subgraph", END)
+    .compile();</code></pre>
+
+<p><strong>3 个重要细节</strong>:</p>
+<ol>
+  <li><strong>合并在 .compile() 时发生</strong> —— 编译完成后子图"消失",变父图的一部分</li>
+  <li><strong>子图节点 ID 被重命名</strong>(避免冲突)—— 父图调 <code>getGraph()</code> 看到的是合并后的</li>
+  <li><strong>要拿合并后的真实 ID</strong>:用 <code>SubGraphNode.formatId(subgraphId, subgraphNodeId)</code></li>
+</ol>
+
+<pre><code>// 中断传递 — 用重命名后的 ID
+var realNodeId = SubGraphNode.formatId("subgraph", "validate");
+var compileConfig = CompileConfig.builder()
+    .checkpointSaver(saver)
+    .interruptBefore(realNodeId)                // ← 中断合并后的子图节点
+    .build();</code></pre>
+
+<h2>6. 3 种方式对比</h2>
+
+<table>
+<thead><tr><th>维度</th><th>① 已编译子图</th><th>② 节点操作</th><th>③ 状态子图(合并)</th></tr></thead>
+<tbody>
+<tr><td><strong>状态共享</strong></td><td>共享 key</td><td>手动转换</td><td>完全共享(同一图)</td></tr>
+<tr><td><strong>中断支持</strong></td><td>✅ 自动(子图自身的断点)</td><td>⚠️ 自己实现</td><td>✅ 自动(用重命名 ID)</td></tr>
+<tr><td><strong>流式传输</strong></td><td>✅ 自动</td><td>⚠️ 自己决定</td><td>✅ 自动</td></tr>
+<tr><td><strong>可视化</strong></td><td>子图是 1 个节点(父图视图)</td><td>子图是 1 个节点</td><td><strong>合并</strong>展开(看真实结构)</td></tr>
+<tr><td><strong>解耦度</strong></td><td>中(共享 schema)</td><td>高(完全独立)</td><td>低(深度耦合)</td></tr>
+<tr><td><strong>子图独立测试</strong></td><td>✅ 易(已编译)</td><td>✅ 易</td><td>❌ 难(合并后不可分)</td></tr>
+<tr><td><strong>使用频率</strong></td><td><strong>80%</strong>(默认)</td><td>15%(状态差异大)</td><td>5%(深度集成)</td></tr>
+</tbody>
+</table>
+
+<h2>7. 中断 + 子图</h2>
+
+<p>方式 ① 和 ③:<strong>子图节点自身的断点配置在子图的 <code>CompileConfig</code> 里</strong>,父图会继承。</p>
+
+<p>方式 ③ 特殊点:<strong>合并后子图节点 ID 被重命名</strong>,父图配置中断时要用新 ID:</p>
+
+<pre><code>// 子图内部用了 "validate" 节点,带 interruptBefore
+var childCompileConfig = CompileConfig.builder()
+    .checkpointSaver(saver)
+    .interruptBefore("validate")
+    .build();
+
+// 父图合并子图后,真实 ID = "subgraph:validate"(重命名)
+var parentConfig = CompileConfig.builder()
+    .checkpointSaver(saver)
+    .interruptBefore("subgraph:validate")   // ← 用合并后 ID
+    .build();</code></pre>
+
+<p><strong>拿真实 ID 的标准 API</strong>:</p>
+
+<pre><code>String realId = SubGraphNode.formatId("subgraph", "validate");
+compileConfig.interruptBefore(realId);</code></pre>
+
+<h2>8. 可视化 + 子图</h2>
+
+<p>方式 ① / ②:子图是父图视图里的<strong>1 个节点</strong>(只看到入口,看不到内部)。</p>
+
+<p>方式 ③:<strong>合并</strong> —— <code>StateGraph.getGraph()</code> 看的是<strong>合并前</strong>(子图是 1 节点),<code>CompiledGraph.getGraph()</code> 看的是<strong>合并后</strong>(子图展开成内部节点)。</p>
+
+<pre><code>// 方式 ① / ②:子图作黑盒
+GraphRepresentation before = parentStateGraph.getGraph(GraphRepresentation.Type.MERMAID);
+System.out.println(before.getContent());   // 父图里"subgraph"是 1 个节点
+
+// 方式 ③:合并后展开
+CompiledGraph compiledParent = parentStateGraph.compile();
+GraphRepresentation after = compiledParent.getGraph(GraphRepresentation.Type.MERMAID);
+System.out.println(after.getContent());    // 父图里能看到子图全部节点</code></pre>
+
+<p><strong>何时用哪种</strong>:</p>
+<ul>
+  <li><strong>父图视角</strong>("子图是 1 个步骤"):用 <code>StateGraph.getGraph()</code></li>
+  <li><strong>子图细节</strong>(调试、Code Review):用 <code>CompiledGraph.getGraph()</code></li>
+</ul>
+
+<h2>9. 流式传输 + 子图</h2>
+
+<table>
+<thead><tr><th>方式</th><th>流式行为</th></tr></thead>
+<tbody>
+<tr><td><strong>① 已编译子图</strong></td><td>✅ 自动启用(子图的 stream 自动接父图)</td></tr>
+<tr><td><strong>② 节点操作</strong></td><td>⚠️ 节点函数自己决定(<code>stream(...).forEachAsync(...)</code>)</td></tr>
+<tr><td><strong>③ 状态子图</strong></td><td>✅ 自动启用(合并后天然支持)</td></tr>
+</tbody>
+</table>
+
+<h2>10. 实战:订单处理子图</h2>
+
+<p>用方式 ①(已编译子图,最常用)搭一个"订单处理"子图,被"AI 客服"主图复用:</p>
+
+<pre><code>// === 子图: order_subgraph ===
+public class OrderSubgraph {
+    static Map&lt;String, Channel&lt;?&gt;&gt; SCHEMA = Map.of(
+        "orderId",   Channel.of((o, n) -&gt; n),                 // 覆盖
+        "orderData", Channels.appender(ArrayList::new),       // 累加
+        "isValid",   Channel.of((o, n) -&gt; n),
+        "paid",      Channel.of((o, n) -&gt; n)
+    );
+
+    public static CompiledGraph build() {
+        return new StateGraph&lt;&gt;(SCHEMA, OrderState::new)
+            .addNode("validate", node_async(state -&gt; {
+                String id = (String) state.value("orderId").orElse("");
+                return Map.of("isValid", !id.isBlank());
+            }))
+            .addNode("chargePayment", node_async(state -&gt; {
+                String id = (String) state.value("orderId").orElse("");
+                // 实际业务:调支付网关
+                return Map.of("paid", true, "orderData", "支付成功:" + id);
+            }))
+            .addConditionalEdges("validate",
+                edge_async(state -&gt;
+                    (Boolean) state.value("isValid").orElse(false) ? "ok" : "bad"),
+                Map.of("ok", "chargePayment", "bad", END))
+            .addEdge("chargePayment", END)
+            .compile();
+    }
+}
+
+// === 父图: AI 客服主图 ===
+public class CustomerServiceGraph {
+    static Map&lt;String, Channel&lt;?&gt;&gt; SCHEMA = Map.of(
+        "userMessage",  Channel.of((o, n) -&gt; n),
+        "orderId",      Channel.of((o, n) -&gt; n),                 // 共享 key
+        "orderData",    Channels.appender(ArrayList::new),       // 共享 key
+        "isValid",      Channel.of((o, n) -&gt; n),                 // 共享 key
+        "finalReply",   Channel.of((o, n) -&gt; n)
+    );
+
+    public static CompiledGraph build() {
+        return new StateGraph&lt;&gt;(SCHEMA, MainState::new)
+            .addNode("parseUserInput", node_async(state -&gt; {
+                // 解析用户消息,提取 orderId(简化)
+                return Map.of("orderId", "ORD-20260622-001");
+            }))
+            .addNode("order_subgraph", OrderSubgraph.build())   // ← 嵌入子图(已编译)
+            .addNode("formatReply", node_async(state -&gt; {
+                String data = ((List&lt;?&gt;) state.value("orderData").orElse(List.of()))
+                    .stream().map(Object::toString).collect(Collectors.joining(";"));
+                return Map.of("finalReply", "订单处理完成:" + data);
+            }))
+            .addEdge(START, "parseUserInput")
+            .addEdge("parseUserInput", "order_subgraph")
+            .addEdge("order_subgraph", "formatReply")
+            .addEdge("formatReply", END)
+            .compile();
+    }
+}
+
+// 跑
+var graph = CustomerServiceGraph.build();
+var config = RunnableConfig.builder().threadId("user-001").build();
+var result = graph.execute(Map.of("userMessage", "我要查订单 ORD-20260622-001"), config);
+System.out.println(result);
+// 输出:{userMessage=..., orderId=ORD-..., orderData=[支付成功:ORD-...], isValid=true, finalReply=订单处理完成:支付成功:ORD-...}</code></pre>
+
+<p><strong>亮点</strong>:</p>
+<ul>
+  <li><code>order_subgraph</code> 是 1 个节点(父图看),但内部 2 节点 + 1 条件边</li>
+  <li>父图 / 子图共享 <code>orderId</code> / <code>orderData</code> / <code>isValid</code> 3 个 key</li>
+  <li>子图独立编译 / 独立测试,父图只管流程编排</li>
+  <li>新加"支付"子图,父图只加 1 个节点 + 1 条边</li>
+</ul>
+
+<h2>11. 实战:多智能体协调(子图作 Agent)</h2>
+
+<p>父图协调 3 个 Agent 子图:</p>
+
+<pre><code>// === 3 个 Agent 子图(都是已编译) ===
+CompiledGraph orderAgent    = OrderAgent.build();    // 处理订单
+CompiledGraph paymentAgent  = PaymentAgent.build();  // 处理支付
+CompiledGraph logisticsAgent = LogisticsAgent.build(); // 处理物流
+
+// === 主图:多 Agent 协调 ===
+var mainGraph = new StateGraph(MainState.SCHEMA, MainState::new)
+    .addNode("router", node_async(state -&gt; {
+        // 路由到对应 Agent(实际用 LLM 分类)
+        String userMsg = (String) state.value("userMessage").orElse("");
+        return Map.of("nextAgent", classify(userMsg));
+    }))
+    .addNode("order_agent",    orderAgent)
+    .addNode("payment_agent",  paymentAgent)
+    .addNode("logistics_agent", logisticsAgent)
+    .addNode("respond",        node_async(state -&gt;
+        Map.of("reply", "已处理:" + state.value("agentResult").orElse(""))))
+
+    .addEdge(START, "router")
+    .addConditionalEdges("router",
+        edge_async(state -&gt; (String) state.value("nextAgent").orElse("")),
+        Map.of(
+            "order",     "order_agent",
+            "payment",   "payment_agent",
+            "logistics", "logistics_agent"
+        ))
+    .addEdge("order_agent",    "respond")
+    .addEdge("payment_agent",  "respond")
+    .addEdge("logistics_agent", "respond")
+    .addEdge("respond", END)
+    .compile();</code></pre>
+
+<p><strong>多智能体价值</strong>:</p>
+<ul>
+  <li>每个 Agent 子图<strong>独立开发 / 测试 / 部署</strong></li>
+  <li>新增 Agent(比如"投诉 Agent")= 加 1 子图 + 1 父图节点 + 1 条件边</li>
+  <li>不同 Agent 可用<strong>不同 LLM</strong>(GPT-4 / Claude / 本地小模型)</li>
+  <li>监控粒度:每个 Agent <strong>独立埋点</strong>、独立超时、独立告警</li>
+</ul>
+
+<h2>12. 决策树(选哪种方式?)</h2>
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" style="max-width:100%;height:auto;background:#0f172a;border-radius:12px;padding:20px;">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+  </defs>
+
+  <text x="450" y="30" text-anchor="middle" fill="#f1f5f9" font-size="20" font-weight="bold">
+    子图添加方式选型
+  </text>
+
+  <rect x="350" y="60" width="200" height="50" rx="8" fill="url(#g1)"/>
+  <text x="450" y="92" text-anchor="middle" fill="white" font-size="14" font-weight="bold">父图 / 子图状态如何?</text>
+
+  <line x1="450" y1="110" x2="450" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="200" y1="140" x2="700" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="150" y1="140" x2="150" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="140" x2="450" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="140" x2="750" y2="170" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="30" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <text x="150" y="195" text-anchor="middle" fill="#10b981" font-size="13" font-weight="bold">共享 ≥ 1 个 key</text>
+  <text x="150" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">方式 ① 已编译子图作节点</text>
+
+  <rect x="330" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#06b6d4" stroke-width="2"/>
+  <text x="450" y="195" text-anchor="middle" fill="#06b6d4" font-size="13" font-weight="bold">状态模式完全不同</text>
+  <text x="450" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">方式 ② 作为节点操作(转换)</text>
+
+  <rect x="630" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#a855f7" stroke-width="2"/>
+  <text x="750" y="195" text-anchor="middle" fill="#a855f7" font-size="13" font-weight="bold">深度集成 / 完全共享</text>
+  <text x="750" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">方式 ③ 作为状态子图(合并)</text>
+
+  <line x1="150" y1="230" x2="150" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="230" x2="450" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="230" x2="750" y2="260" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="30" y="260" width="240" height="80" rx="6" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="150" y="285" text-anchor="middle" fill="#10b981" font-size="12" font-weight="bold">80% 场景,默认选</text>
+  <text x="150" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">addNode("sub",</text>
+  <text x="150" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">  child.compile())</text>
+  <text x="150" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">中断 / 流 / 独立测试都 OK</text>
+
+  <rect x="330" y="260" width="240" height="80" rx="6" fill="#0f172a" stroke="#06b6d4" stroke-width="1"/>
+  <text x="330" y="285" text-anchor="middle" fill="#06b6d4" font-size="12" font-weight="bold">15% 场景</text>
+  <text x="330" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">addNode("sub", state -&gt; {</text>
+  <text x="330" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">  转换 + stream(child)</text>
+  <text x="330" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">})</text>
+
+  <rect x="630" y="260" width="240" height="80" rx="6" fill="#0f172a" stroke="#a855f7" stroke-width="1"/>
+  <text x="750" y="285" text-anchor="middle" fill="#a855f7" font-size="12" font-weight="bold">5% 场景,慎用</text>
+  <text x="750" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">addNode("sub", childGraph)</text>
+  <text x="750" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">编译时合并</text>
+  <text x="750" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">节点 ID 重命名!</text>
+
+  <rect x="50" y="370" width="800" height="150" rx="8" fill="url(#g2)"/>
+  <text x="450" y="395" text-anchor="middle" fill="white" font-size="14" font-weight="bold">3 个核心实战场景</text>
+  <text x="450" y="418" text-anchor="middle" fill="white" font-size="12">🧩 大图拆小:主图 30 节点 → 1 父图 + 5 子图(每个 ≤ 8 节点)</text>
+  <text x="450" y="438" text-anchor="middle" fill="white" font-size="12">👥 多智能体协调:父图 router + N 个 Agent 子图(订单 / 支付 / 物流)</text>
+  <text x="450" y="458" text-anchor="middle" fill="white" font-size="12">♻️ 跨图复用:用户认证子图 → 登录 / 注册 / 改密码 4 个父图共享</text>
+  <text x="450" y="478" text-anchor="middle" fill="white" font-size="12">🏢 团队协作:订单 / 物流团队各管子图,只约定 State key 即可</text>
+  <text x="450" y="498" text-anchor="middle" fill="white" font-size="12">🔌 A/B 测试:同一父图,子图 v1 / v2 切换看效果</text>
+</svg>
+
+<h2>13. 5 个避坑</h2>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 1:方式 ① 父图 / 子图无共享 key,通信失败</strong><br>
+<strong>症状</strong>:<code>addNode("sub", child.compile())</code> 后,子图收不到父图的 input,父图也收不到子图的 output。<br>
+<strong>根因</strong>:方式 ① 要求<strong>至少共享一个 key</strong>才能通信,完全无共享 → 通信断开。<br>
+<strong>修法</strong>:要么在父图 / 子图加共享 key;要么用方式 ②(节点操作 + 手动转换)。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 2:方式 ③ 中断配置用错 ID(子图原始名)</strong><br>
+<strong>症状</strong>:子图里有 <code>interruptBefore("validate")</code>,父图继承后<strong>不生效</strong>。<br>
+<strong>根因</strong>:方式 ③ 编译时<strong>子图节点 ID 被重命名</strong>(避免冲突),父图中断要用合并后的 ID。<br>
+<strong>修法</strong>:用 <code>SubGraphNode.formatId("subgraph", "validate")</code> 拿真实 ID,父图 <code>interruptBefore(realId)</code>。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 3:方式 ② 节点操作忘了消费 stream</strong><br>
+<strong>症状</strong>:<code>addNode("sub", state -&gt; compiledChild.stream(input).thenApply(...))</code>,子图根本没跑,只跑了个空 generator。<br>
+<strong>根因</strong>:<code>stream()</code> 返回 lazy 的 <code>AsyncGenerator</code>,<strong>没消费就不会触发执行</strong>。<br>
+<strong>修法</strong>:用 <code>.forEachAsync(...).thenApply(...)</code> 同步消费完再返回,或者 <code>.collectList().await()</code>。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 4:子图返回额外 key 期望父图能拿到</strong><br>
+<strong>症状</strong>:子图定义 schema 里有 <code>internalDebug</code>,子图 node 返回 <code>Map.of("internalDebug", "...")</code>,期望父图能 debug。<br>
+<strong>根因</strong>:<strong>子图返回的额外 key 父图会忽略</strong>(父图 schema 没定义就丢),子图收的额外 key 也忽略。<br>
+<strong>修法</strong>:要么把 key 加到父图 schema;要么在父图节点里手动 <code>state.update("internalDebug", ...)</code>。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 5:子图嵌套太深,debug 难</strong><br>
+<strong>症状</strong>:"订单子图" → "支付子图" → "支付宝子图" → "签名子图",4 层嵌套,出问题不知在哪层。<br>
+<strong>根因</strong>:子图嵌套深度无限制(只看 <code>recursionLimit</code>),过深后 <code>getGraph()</code> 难读。<br>
+<strong>修法</strong>:
+<ul>
+  <li>嵌套 <strong>不超过 3 层</strong>(子图 → 父图 → 祖父图)</li>
+  <li>每层加 <code>graphId</code>(<code>config.graphId()</code> 看当前在哪层)</li>
+  <li>用 <code>graph.getState(config)</code> 看完整嵌套 state</li>
+  <li>关键节点配断点(<code>interruptBefore</code>)逐层 review</li>
+</ul>
+</div>
+
+<h2>14. 速查表</h2>
+
+<table>
+<thead><tr><th>项</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><strong>核心</strong></td><td>子图 = 用作节点的图(封装 + 组合)</td></tr>
+<tr><td><strong>3 种添加</strong></td><td>① 已编译 / ② 节点操作 / ③ 状态子图(合并)</td></tr>
+<tr><td><strong>方式 ①</strong></td><td><code>addNode("sub", childGraph.compile())</code> — <strong>80% 默认</strong></td></tr>
+<tr><td><strong>方式 ②</strong></td><td><code>addNode("sub", state -&gt; ...stream(subgraph))</code> — 15%</td></tr>
+<tr><td><strong>方式 ③</strong></td><td><code>addNode("sub", childGraph)</code>(未编译) — 5% 慎用</td></tr>
+<tr><td><strong>共享 key 规则</strong></td><td>方式 ① 至少 1 个;额外 key 父 / 子双方互相忽略</td></tr>
+<tr><td><strong>方式 ① 中断</strong></td><td>子图自身的 <code>CompileConfig.interruptBefore/After</code>,父图继承</td></tr>
+<tr><td><strong>方式 ③ 中断</strong></td><td>用 <code>SubGraphNode.formatId(subgraphId, nodeId)</code> 拿合并后 ID</td></tr>
+<tr><td><strong>方式 ① / ② 流</strong></td><td>① 自动 / ② 自己实现(<code>stream().forEachAsync()</code>)</td></tr>
+<tr><td><strong>方式 ③ 流</strong></td><td>自动(合并后天然支持)</td></tr>
+<tr><td><strong>可视化</strong></td><td>方式 ①/② 子图是 1 节点;方式 ③ <code>CompiledGraph.getGraph()</code> 看展开</td></tr>
+<tr><td><strong>子图独立测试</strong></td><td>方式 ① 最佳(已编译,可单独跑);方式 ③ 难(合并后不可分)</td></tr>
+<tr><td><strong>子图 ID 重命名</strong></td><td>方式 ③ 编译时自动(避免冲突)</td></tr>
+<tr><td><strong>嵌套深度</strong></td><td><strong>≤ 3 层</strong>(超过 debug 难)</td></tr>
+<tr><td><strong>常见用途</strong></td><td>大图拆小 / 多智能体 / 跨图复用 / 团队协作 / A/B 测试</td></tr>
+</tbody>
+</table>
+
+<h2>15. 本章小结</h2>
+
+<ul>
+  <li><strong>子图 = 节点的图</strong>,本质是<strong>封装 + 组合</strong></li>
+  <li><strong>3 种添加方式</strong>:① 已编译(默认 80%)/ ② 节点操作(状态差异 15%)/ ③ 状态子图合并(深度集成 5%)</li>
+  <li><strong>方式 ① 关键</strong>:父 / 子图<strong>至少共享一个 key</strong>;额外 key 互相忽略</li>
+  <li><strong>方式 ③ 关键</strong>:编译时合并,节点 ID 重命名(用 <code>SubGraphNode.formatId</code> 拿真实 ID)</li>
+  <li><strong>3 大场景</strong>:大图拆小 / 多智能体协调 / 跨图复用 + 团队独立开发</li>
+  <li><strong>中断 + 流式</strong>:方式 ①/③ 自动,方式 ② 自己实现</li>
+  <li><strong>可视化</strong>:<code>StateGraph.getGraph()</code> 看父图视角(子图 1 节点),<code>CompiledGraph.getGraph()</code> 看合并后细节</li>
+</ul>
+
+<blockquote class="mihuang">
+  <strong>一句话总结</strong>:LangGraph4j 子图 = <strong>"大图拆小 + 多智能体 + 跨图复用"</strong>。80% 用方式 ①(已编译子图),15% 用方式 ②(节点操作 + 转换),5% 用方式 ③(深度合并)。下一章(lg03 并行分支)让多个节点<strong>同时跑</strong>。
+</blockquote>
+
+</main>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

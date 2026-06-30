@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lg06 · 取消 · LangGraph4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">06</span> 取消(超时 / 用户取消 / 子图传播)</h1>
+    <p class="hero-sub">AsyncGenerator.cancel() × mayInterruptIfRunning × forEachAsync / for-each 两种消费 × 子图传播 · 6 业务场景</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<strong>取消 = 主动终止正在执行的 graph 流</strong>。LangGraph4j 基于 <code>java-async-generator</code> 库的取消机制,<code>workflow.stream(...)</code> 返回的 <code>AsyncGenerator</code> 实例可以调用 <code>cancel(mayInterruptIfRunning)</code>。<code>true</code> = 立即中断线程抛 <code>InterruptedException</code>,<code>false</code> = 优雅停止(当前节点跑完再停);子图自动传播取消。</p>
+
+<p><strong>核心价值</strong>:长跑图(批处理 / 复杂 agent 循环 / 外部 API 等)在"用户不想等了 / 超时了 / 资源不够"时能<strong>主动停</strong>,而不是等图自然跑完浪费时间 + 浪费 token。</p>
+
+<div class="svg-box">
+<svg viewBox="0 0 900 280" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;">
+  <defs>
+    <linearGradient id="running" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="graceful" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#b45309"/>
+    </linearGradient>
+    <linearGradient id="immediate" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ef4444"/><stop offset="100%" stop-color="#b91c1c"/>
+    </linearGradient>
+    <marker id="arr06" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+  <text x="450" y="28" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">两种取消策略对比</text>
+
+  <!-- cancel(true) immediate -->
+  <rect x="40" y="70" width="380" height="180" rx="10" fill="none" stroke="url(#immediate)" stroke-width="2"/>
+  <text x="230" y="95" text-anchor="middle" fill="#fca5a5" font-size="13" font-weight="600">⚡ cancel(true) 立即取消</text>
+
+  <rect x="60" y="115" width="80" height="35" rx="6" fill="url(#running)"/>
+  <text x="100" y="138" text-anchor="middle" fill="#fff" font-size="11">nodeA ✓</text>
+  <rect x="150" y="115" width="80" height="35" rx="6" fill="#ef4444"/>
+  <text x="190" y="138" text-anchor="middle" fill="#fff" font-size="11">nodeB ✗</text>
+  <rect x="240" y="115" width="80" height="35" rx="4" fill="#475569" stroke="#ef4444" stroke-dasharray="3,2"/>
+  <text x="280" y="138" text-anchor="middle" fill="#94a3b8" font-size="11">nodeC 跳过</text>
+  <line x1="100" y1="150" x2="190" y2="150" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr06)"/>
+  <line x1="190" y1="150" x2="280" y2="150" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr06)"/>
+
+  <text x="60" y="180" fill="#fca5a5" font-size="11">↑ 中断执行线程</text>
+  <text x="60" y="200" fill="#cbd5e1" font-size="11">CompletableFuture 异常完成</text>
+  <text x="60" y="220" fill="#cbd5e1" font-size="11">抛 InterruptedException</text>
+  <text x="60" y="240" fill="#94a3b8" font-size="10">典型:用户点"取消"按钮</text>
+
+  <!-- cancel(false) graceful -->
+  <rect x="480" y="70" width="380" height="180" rx="10" fill="none" stroke="url(#graceful)" stroke-width="2"/>
+  <text x="670" y="95" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="600">🛑 cancel(false) 优雅取消</text>
+
+  <rect x="500" y="115" width="80" height="35" rx="6" fill="url(#running)"/>
+  <text x="540" y="138" text-anchor="middle" fill="#fff" font-size="11">nodeA ✓</text>
+  <rect x="590" y="115" width="80" height="35" rx="6" fill="url(#graceful)"/>
+  <text x="630" y="138" text-anchor="middle" fill="#fff" font-size="11">nodeB ✓</text>
+  <rect x="680" y="115" width="80" height="35" rx="4" fill="#475569" stroke="#f59e0b" stroke-dasharray="3,2"/>
+  <text x="720" y="138" text-anchor="middle" fill="#94a3b8" font-size="11">nodeC 跳过</text>
+  <line x1="540" y1="150" x2="630" y2="150" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr06)"/>
+  <line x1="630" y1="150" x2="720" y2="150" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr06)"/>
+
+  <text x="500" y="180" fill="#fbbf24" font-size="11">↑ 当前节点跑完再停</text>
+  <text x="500" y="200" fill="#cbd5e1" font-size="11">不抛异常,优雅终止</text>
+  <text x="500" y="220" fill="#cbd5e1" font-size="11">isCancelled() = true</text>
+  <text x="500" y="240" fill="#94a3b8" font-size="10">典型:5 秒超时兜底</text>
+</svg>
+</div>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"用户点了一个 AI 客服按钮,agent 在循环调工具 / 等外部 API。结果用户等不及点'取消',但 agent 还在后台跑 —— token 在烧、API 在调,等真正停了已经欠费 5 块钱了。"</p>
+
+<p><strong>解法</strong>:用 <strong>取消</strong> —— graph 流式执行(<code>stream()</code>)返回 <code>AsyncGenerator</code>,持有引用就能随时 <code>cancel()</code>。<strong>子图自动传播</strong>,父图取消子图也跟着停,不会"父停了子还在烧"。</p>
+
+<h3>6 个取消能解决的事</h3>
+<ul>
+  <li><strong>🛑 用户点"停止"按钮</strong> — 前端发个请求,后端立刻调 <code>cancel(true)</code> 中断,token 不再烧</li>
+  <li><strong>⏱️ 5 秒超时兜底</strong> — 异步任务 <code>CompletableFuture.get(5, SECONDS)</code>,超时调 <code>cancel(false)</code> 让当前节点跑完</li>
+  <li><strong>💸 成本熔断</strong> — 本次会话 token 用超预算,立即 <code>cancel(true)</code>,比"让它跑完欠 5 块"省</li>
+  <li><strong>🧪 调试中断</strong> — 复杂 agent 跑飞了(死循环 / 调错工具),开发时手动 cancel,看已累积的 state 排错</li>
+  <li><strong>🧹 资源回收</strong> — 节点持有的连接 / 文件句柄,配合 <code>try-with-resources</code> + cancel 实现优雅关闭</li>
+  <li><strong>🌲 子图级联停止</strong> — 父 agent 取消,所有正在跑的子 agent 自动停(取消传播)</li>
+</ul>
+
+<p><strong>💡 什么时候不需要</strong>:同步 <code>execute()</code> 调用(没有流可取消)/ 图非常短(单节点秒完)/ 节点全是纯计算没有外部 IO(取消意义不大)/ 用线程池硬隔离 + 进程级 kill 的场景(更粗暴)。</p>
+
+<h2>2. 核心概念</h2>
+
+<h3>2.1 取消机制三要素</h3>
+<table class="compare-table">
+  <thead>
+    <tr><th>要素</th><th>API</th><th>作用</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>触发取消</td><td><code>generator.cancel(boolean mayInterruptIfRunning)</code></td><td><code>true</code> = 立即中断线程;<code>false</code> = 当前节点跑完再停</td></tr>
+    <tr><td>检查状态</td><td><code>generator.isCancelled()</code></td><td>返回 <code>boolean</code>,流是否已取消</td></tr>
+    <tr><td>异常传播</td><td><code>CompletableFuture</code> / <code>for-each</code> 终止</td><td>异步场景抛 <code>InterruptedException</code>;同步场景 <code>hasNext()</code> 返回 false</td></tr>
+  </tbody>
+</table>
+
+<h3>2.2 两种消费方式 × 取消行为</h3>
+<div class="svg-box">
+<svg viewBox="0 0 900 280" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;">
+  <text x="450" y="25" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">两种流消费方式的取消行为</text>
+
+  <!-- forEachAsync -->
+  <rect x="40" y="60" width="380" height="200" rx="10" fill="#1e293b" stroke="#3b82f6" stroke-width="2"/>
+  <text x="230" y="85" text-anchor="middle" fill="#93c5fd" font-size="13" font-weight="600">🔄 forEachAsync(异步线程)</text>
+  <text x="230" y="105" text-anchor="middle" fill="#cbd5e1" font-size="11">generator.forEachAsync(output -&gt; {...})</text>
+
+  <rect x="60" y="125" width="340" height="35" rx="6" fill="#0f172a"/>
+  <text x="230" y="148" text-anchor="middle" fill="#cbd5e1" font-size="11">图执行在独立线程,主线程继续做其他事</text>
+
+  <rect x="60" y="170" width="160" height="35" rx="6" fill="#3b82f6"/>
+  <text x="140" y="193" text-anchor="middle" fill="#fff" font-size="11">cancel(true) → 异常</text>
+  <rect x="230" y="170" width="170" height="35" rx="6" fill="#1d4ed8"/>
+  <text x="315" y="193" text-anchor="middle" fill="#fff" font-size="11">cancel(false) → 优雅停</text>
+  <text x="60" y="225" fill="#cbd5e1" font-size="11">future.get() 拿结果 + .exceptionally() 接异常</text>
+  <text x="60" y="245" fill="#94a3b8" font-size="10">适合:异步任务 / Web 请求 / 长跑批处理</text>
+
+  <!-- for-each -->
+  <rect x="480" y="60" width="380" height="200" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+  <text x="670" y="85" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="600">➡️ for-each(当前线程)</text>
+  <text x="670" y="105" text-anchor="middle" fill="#cbd5e1" font-size="11">for (var output : generator) {...}</text>
+
+  <rect x="500" y="125" width="340" height="35" rx="6" fill="#0f172a"/>
+  <text x="670" y="148" text-anchor="middle" fill="#cbd5e1" font-size="11">图执行在当前线程,迭代时同步消费</text>
+
+  <rect x="500" y="170" width="160" height="35" rx="6" fill="#b45309"/>
+  <text x="580" y="193" text-anchor="middle" fill="#fff" font-size="11">cancel(true) → hasNext()=false</text>
+  <rect x="670" y="170" width="160" height="35" rx="6" fill="#f59e0b"/>
+  <text x="750" y="193" text-anchor="middle" fill="#fff" font-size="11">cancel(false) → hasNext()=false</text>
+  <text x="500" y="225" fill="#cbd5e1" font-size="11">无异常,循环自然退出</text>
+  <text x="500" y="245" fill="#94a3b8" font-size="10">适合:CLI / 批跑 / 调试观察</text>
+</svg>
+</div>
+
+<h3>2.3 取消传播(子图级联)</h3>
+<div class="callout ok">
+<p><strong>✓ 取消自动传播到子图</strong>。父图调 <code>cancel(...)</code>,所有当前正在执行的子图同步收到取消信号,不会"父停了子还在烧"。这是 LangGraph4j 内置行为,不需要手动通知子图。</p>
+</div>
+
+<h2>3. 极简调用(2 行取消图流)</h2>
+<p>最小可运行 demo,启动图流后 500ms 自动取消:</p>
+
+<pre><code class="language-java">import org.bsc.async.AsyncGenerator;
+
+AsyncGenerator&lt;NodeOutput&lt;?&gt;&gt; generator = workflow.stream(GraphInput.noArgs(), RunnableConfig.builder().build());
+
+// 500ms 后在另一个线程取消
+CompletableFuture.runAsync(() -&gt; {
+    try { Thread.sleep(500); } catch (InterruptedException e) { throw new RuntimeException(e); }
+    generator.cancel(true);   // ← 一行立即取消
+});
+
+// 消费流(异步)
+CompletableFuture&lt;String&gt; result = generator.forEachAsync(output -&gt; 
+    System.out.println("node: " + output.node()))
+    .exceptionally(ex -&gt; {
+        assertTrue(generator.isCancelled());  // ← 检查取消状态
+        return "CANCELLED";
+    });</code></pre>
+
+<p>500ms 后图被中断,<code>forEachAsync</code> 的 CompletableFuture 抛 <code>InterruptedException</code>,<code>exceptionally</code> 兜底返回 <code>"CANCELLED"</code>。</p>
+
+<h2>4. 两种取消策略实战</h2>
+
+<h3>4.1 cancel(true) 立即取消 + 异常处理</h3>
+<pre><code class="language-java">// 场景:用户点"停止"按钮,立刻中断,不等当前节点跑完
+AsyncGenerator&lt;NodeOutput&lt;AgentState&gt;&gt; gen = workflow.stream(inputs, config);
+
+CompletableFuture&lt;String&gt; future = gen.forEachAsync(output -&gt; {
+    log.info("正在执行: {}", output.node());
+}).handle((result, ex) -&gt; {
+    if (ex != null) {
+        if (ex.getCause() instanceof InterruptedException) {
+            log.warn("用户中断,清理资源");
+            cleanupResources(gen);  // 关闭文件句柄 / DB 连接
+            return "INTERRUPTED";
+        }
+        return "ERROR: " + ex.getMessage();
+    }
+    return "COMPLETED";
+});
+
+// 用户点"停止" → WebSocket 发 cancel 信号
+public void onUserCancel() {
+    boolean cancelled = gen.cancel(true);
+    log.info("cancel(true) 返回: {}", cancelled);
+    // 中断执行线程,CompletableFuture 异常完成,future.handle() 兜底
+}</code></pre>
+
+<h3>4.2 cancel(false) 优雅取消 + 当前节点跑完</h3>
+<pre><code class="language-java">// 场景:5 秒超时兜底,让当前节点跑完再停,不浪费已开始的 IO
+AsyncGenerator&lt;NodeOutput&lt;AgentState&gt;&gt; gen = workflow.stream(inputs, config);
+
+CompletableFuture&lt;NodeOutput&lt;AgentState&gt;&gt; future = gen.forEachAsync(output -&gt; {
+    log.info("正在执行: {}", output.node());
+});
+
+// 5 秒超时
+try {
+    NodeOutput&lt;AgentState&gt; lastOutput = future.get(5, TimeUnit.SECONDS);
+    log.info("5 秒内跑完,最后节点: {}", lastOutput.node());
+} catch (TimeoutException e) {
+    log.warn("5 秒超时,优雅停止");
+    gen.cancel(false);   // ← 当前节点跑完再停
+    // future 会正常完成(不抛异常),但 isCancelled() 返回 true
+    Thread.sleep(200);  // 等一下,让 generator 走完关闭流程
+    assertTrue(gen.isCancelled());
+    log.info("已停止,不再烧 token");
+}</code></pre>
+
+<h3>4.3 for-each 同步消费 + 取消</h3>
+<pre><code class="language-java">// 场景:CLI 工具 / 批跑脚本 / 调试观察(同线程消费)
+AsyncGenerator&lt;NodeOutput&lt;AgentState&gt;&gt; gen = workflow.stream(inputs, config);
+
+// 另一线程 500ms 后取消
+CompletableFuture.runAsync(() -&gt; {
+    try { Thread.sleep(500); } catch (InterruptedException e) { return; }
+    gen.cancel(true);  // 或 false,行为一致
+});
+
+NodeOutput&lt;AgentState&gt; currentOutput = null;
+try {
+    for (var output : gen) {
+        log.info("正在执行: {}", output.node());
+        currentOutput = output;
+    }
+} catch (Exception e) {
+    log.error("迭代异常", e);
+}
+
+// 取消后 hasNext() 返回 false,循环自然退出
+assertNotNull(currentOutput);                    // 至少跑了一个节点
+assertNotEquals(END, currentOutput.node());      // 没到 END 就停了
+assertTrue(gen.isCancelled());                   // 取消状态确认</code></pre>
+
+<h2>5. 实战:跨境电商 AI 客服 + 取消控制(6 业务场景落地)</h2>
+
+<p>跨境电商 AI 客服 agent,长跑场景非常多 —— 调物流 API / 调 ERP 查库存 / LLM 多步推理。<strong>用户随时可能取消</strong>,系统必须能立即停 + 不浪费 token + 资源优雅回收。</p>
+
+<h3>WMS 业务场景映射</h3>
+<table class="compare-table">
+  <thead>
+    <tr><th>业务场景</th><th>取消策略</th><th>实现要点</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>🛑 用户点"停止"按钮</td><td><code>cancel(true)</code> 立即中断</td><td>WebSocket 推信号 → 后端 <code>cancel(true)</code></td></tr>
+    <tr><td>⏱️ 30 秒超时兜底</td><td><code>cancel(false)</code> 优雅停</td><td><code>future.get(30, SECONDS)</code> → <code>TimeoutException</code> → cancel</td></tr>
+    <tr><td>💸 成本熔断(超 1 元 token)</td><td><code>cancel(true)</code> 立即停</td><td>累计 token 花费超阈值 → cancel + 提示用户</td></tr>
+    <tr><td>🧹 资源回收</td><td><code>cancel(false)</code> + <code>finally</code></td><td>DB 连接 / 临时文件 / 锁在 finally 里释放</td></tr>
+    <tr><td>🌲 子图级联停止</td><td>父 cancel → 子自动停</td><td>主 agent cancel,所有子 agent(查订单/查库存)同步停</td></tr>
+    <tr><td>🧪 调试死循环</td><td><code>cancel(true)</code> + 看 state</td><td>开发态手动 cancel,看累积 state 排错</td></tr>
+  </tbody>
+</table>
+
+<h3>完整代码</h3>
+<pre><code class="language-java">// ============ 1. 启动流 + 注册取消控制器 ============
+public class CancellableAgentRunner {
+
+    private AsyncGenerator&lt;NodeOutput&lt;AgentState&gt;&gt; generator;
+    private final AtomicBoolean userCancelled = new AtomicBoolean(false);
+    private final AtomicReference&lt;Double&gt; tokenCost = new AtomicReference&lt;&lt;&gt;(0.0);
+
+    public CompletableFuture&lt;String&gt; run(CompiledGraph&lt;AgentState&gt; graph, Map&lt;String, Object&gt; inputs) {
+        this.generator = graph.stream(inputs, RunnableConfig.builder().build());
+
+        // 异步消费流
+        return generator.forEachAsync(output -&gt; {
+            String nodeId = output.node();
+            log.info("[AGENT] 正在执行节点: {}", nodeId);
+            // 累计 token 成本(每次 LLM 调用后更新)
+            if (nodeId.startsWith("llm_")) {
+                tokenCost.updateAndGet(c -&gt; c + estimateCost(output.state()));
+            }
+        }).handle((result, ex) -&gt; {
+            // 取消 / 异常 / 正常完成统一兜底
+            if (ex != null) {
+                if (ex.getCause() instanceof InterruptedException) {
+                    log.warn("[AGENT] 被中断,token 已烧: ¥{}", tokenCost.get());
+                    return "INTERRUPTED";
+                }
+                log.error("[AGENT] 执行异常", ex);
+                return "ERROR: " + ex.getMessage();
+            }
+            return "COMPLETED";
+        });
+    }
+
+    // ============ 2. 用户取消按钮(WebSocket 推信号) ============
+    public boolean onUserCancel() {
+        userCancelled.set(true);
+        boolean cancelled = generator.cancel(true);   // ← 立即中断
+        log.info("[AGENT] 用户取消,结果: {}, token 已烧: ¥{}", cancelled, tokenCost.get());
+        return cancelled;
+    }
+
+    // ============ 3. 30 秒超时兜底(优雅停) ============
+    public String runWithTimeout(CompiledGraph&lt;AgentState&gt; graph, Map&lt;String, Object&gt; inputs, long timeoutSec) {
+        try {
+            return run(graph, inputs).get(timeoutSec, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            log.warn("[AGENT] {} 秒超时,优雅停止", timeoutSec);
+            generator.cancel(false);   // ← 当前节点跑完再停
+            // 等 generator 走完关闭流程
+            try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            return "TIMEOUT_GRACEFUL";
+        } catch (Exception e) {
+            log.error("[AGENT] 执行异常", e);
+            return "ERROR";
+        }
+    }
+
+    // ============ 4. 成本熔断(超 1 元立即停) ============
+    public void startCostWatchdog(double maxCostYuan) {
+        // 后台线程每 100ms 检查 token 成本
+        CompletableFuture.runAsync(() -&gt; {
+            while (!Thread.currentThread().isInterrupted() &amp;&amp; !generator.isCancelled()) {
+                if (tokenCost.get() &gt; maxCostYuan) {
+                    log.warn("[AGENT] token 成本 ¥{} 超阈值 ¥{},立即停止", tokenCost.get(), maxCostYuan);
+                    generator.cancel(true);   // ← 立即停
+                    break;
+                }
+                try { Thread.sleep(100); } catch (InterruptedException e) { break; }
+            }
+        });
+    }
+
+    // ============ 5. 资源回收(配合 cancel 用 try-with-resources) ============
+    public String runWithResourceCleanup(CompiledGraph&lt;AgentState&gt; graph, Map&lt;String, Object&gt; inputs) {
+        AsyncGenerator&lt;NodeOutput&lt;AgentState&gt;&gt; gen = graph.stream(inputs, RunnableConfig.builder().build());
+        List&lt;AutoCloseable&gt; resources = new ArrayList&lt;&gt;();
+        try {
+            return gen.forEachAsync(output -&gt; {
+                // 节点内可能打开 DB 连接 / 临时文件,登记到 resources
+                if (output.node().equals("query_db")) {
+                    resources.add(openDbConnection());
+                }
+            }).handle((r, ex) -&gt; {
+                if (ex != null &amp;&amp; ex.getCause() instanceof InterruptedException) {
+                    log.info("[AGENT] 被中断,清理 {} 个资源", resources.size());
+                }
+                return ex == null ? "COMPLETED" : "INTERRUPTED";
+            }).get(30, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return "ERROR";
+        } finally {
+            // 不管成功 / 取消 / 异常,都关闭资源
+            for (AutoCloseable r : resources) {
+                try { r.close(); } catch (Exception ignored) {}
+            }
+            if (!gen.isCancelled()) gen.cancel(false);  // 确保流关闭
+        }
+    }
+
+    private AutoCloseable openDbConnection() { return () -&gt; log.info("DB 连接关闭"); }
+    private double estimateCost(AgentState state) { return 0.05; }  // 简化估算
+}</code></pre>
+
+<p>这一段覆盖了 6 个业务场景的取消控制 —— <strong>用户主动取消、超时兜底、成本熔断、资源回收、子图传播、调试中断</strong>,所有取消场景都通过 <code>generator.cancel(...)</code> + <code>isCancelled()</code> + <code>handle()</code> 三件套统一收口。</p>
+
+<h2>6. 决策树(用 cancel(true) 还是 false?)</h2>
+<div class="svg-box">
+<svg viewBox="0 0 900 320" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;">
+  <text x="450" y="25" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">取消策略决策树</text>
+  <rect x="350" y="50" width="200" height="45" rx="8" fill="#8b5cf6"/>
+  <text x="450" y="78" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">触发取消的"急"程度?</text>
+  <line x1="450" y1="95" x2="450" y2="115" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="100" y="120" width="280" height="45" rx="8" fill="#3b82f6"/>
+  <text x="240" y="148" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">急(用户点取消 / 成本熔断)</text>
+  <rect x="520" y="120" width="280" height="45" rx="8" fill="#3b82f6"/>
+  <text x="660" y="148" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">缓(超时兜底 / 资源回收)</text>
+
+  <line x1="240" y1="165" x2="240" y2="190" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="660" y1="165" x2="660" y2="190" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="50" y="195" width="380" height="45" rx="8" fill="#ef4444"/>
+  <text x="240" y="223" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">✓ cancel(true) 立即中断</text>
+  <rect x="470" y="195" width="380" height="45" rx="8" fill="#f59e0b"/>
+  <text x="660" y="223" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">✓ cancel(false) 优雅停止</text>
+
+  <rect x="50" y="255" width="380" height="60" rx="8" fill="#0f172a" stroke="#ef4444"/>
+  <text x="240" y="278" text-anchor="middle" fill="#fca5a5" font-size="11">抛 InterruptedException</text>
+  <text x="240" y="298" text-anchor="middle" fill="#cbd5e1" font-size="11">handle() 接异常 + 清理资源</text>
+
+  <rect x="470" y="255" width="380" height="60" rx="8" fill="#0f172a" stroke="#f59e0b"/>
+  <text x="660" y="278" text-anchor="middle" fill="#fbbf24" font-size="11">不抛异常,future 正常完成</text>
+  <text x="660" y="298" text-anchor="middle" fill="#cbd5e1" font-size="11">isCancelled() = true,finally 清理</text>
+</svg>
+</div>
+
+<h2>7. 5 个避坑</h2>
+
+<div class="callout warn">
+<p><strong>❶ 同步 execute() 没有流可取消,只有 stream() 才能 cancel</strong></p>
+<p><code>graph.execute(...)</code> 是同步阻塞调用,执行完才返回,中途无法取消。<strong>必须用 <code>graph.stream(...)</code></strong> 拿到 <code>AsyncGenerator</code> 实例才能 cancel。常见 bug:线上代码用 <code>execute()</code> 然后还想"中途取消",无解。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❷ 异步 cancel(true) 后,主线程别忘了等 generator 走完关闭流程</strong></p>
+<p><code>cancel(true)</code> 中断执行线程后,<code>AsyncGenerator</code> 内部的清理逻辑(关闭子流、释放 buffer)仍在异步进行。<strong>主线程立即用 generator 可能拿到半状态</strong>。建议 <code>Thread.sleep(200)</code> 或监听 <code>isCancelled()</code> 确认清理完。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❸ forEachAsync 必须配 .handle() 或 .exceptionally() 接异常</strong></p>
+<p><code>cancel(true)</code> 会让 <code>CompletableFuture</code> 异常完成,如果不接异常,<strong>异常被吞掉</strong>,调用方以为正常完成。正确写法:<code>.handle((r, ex) -&gt; ex != null ? "INTERRUPTED" : "OK")</code>。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❹ 子图取消传播是单向的(父→子),子不能反向取消父</strong></p>
+<p>父图 cancel 会传播到所有子图;但子图 cancel <strong>不会反向取消父图</strong>(父图可能还有别的子图在跑)。设计系统时,父子取消策略要单独设计,别假设"子停了父也停"。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❺ cancel 后 state 已经写入的部分不会回滚</strong></p>
+<p>cancel 中断执行,但<strong>已经执行的节点写入的 state 不会回滚</strong>(如已写入数据库的订单状态)。要做"事务性取消",得在 hook(见 lg05)里包 <code>@Transactional</code> + rollback,或在节点里检查 <code>generator.isCancelled()</code> 主动跳过副作用。</p>
+</div>
+
+<h2>8. 速查表</h2>
+<table class="compare-table">
+  <thead>
+    <tr><th>API</th><th>行为</th><th>典型场景</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>generator.cancel(true)</code></td><td>立即中断线程,抛 InterruptedException</td><td>用户点"停止" / 成本熔断</td></tr>
+    <tr><td><code>generator.cancel(false)</code></td><td>当前节点跑完再停,不抛异常</td><td>超时兜底 / 资源回收</td></tr>
+    <tr><td><code>generator.isCancelled()</code></td><td>检查是否已取消</td><td>finally / 节点内判断</td></tr>
+    <tr><td><code>forEachAsync(...)</code></td><td>异步线程消费,异常通过 CompletableFuture 传播</td><td>Web 请求 / 异步任务</td></tr>
+    <tr><td><code>for (var o : gen)</code></td><td>当前线程消费,hasNext() 返回 false 退出</td><td>CLI / 批跑 / 调试</td></tr>
+    <tr><td>子图取消传播</td><td>父 cancel → 子自动 cancel(单向)</td><td>多 agent 嵌套</td></tr>
+  </tbody>
+</table>
+
+<h2>9. 本章小结</h2>
+<blockquote>
+<p><strong>取消 = 流式图的"主动终止"机制</strong>。<code>stream()</code> 拿 <code>AsyncGenerator</code>,<code>cancel(true/false)</code> 触发停止,子图自动传播。</p>
+<p>下一章 <strong>lg07 · 检查点(Postgres)</strong>:长跑 agent 的"存档 / 读档"机制 —— graph 中途崩了能从最近的存档恢复 + 支持人介入修改 state 后继续跑,核心是 <code>Checkpoint</code> + <code>Saver</code>(MemorySaver / PostgresSaver)。</p>
+</blockquote>
+
+</main>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

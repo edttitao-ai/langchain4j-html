@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch01 · Chat and Language Models · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">入门第一张 · 底层 API</span>
+    <h1><span class="num">01</span>Chat and Language Models</h1>
+    <p class="lead">LangChain4j 调用大模型的<strong>最底层入口</strong>。<code>ChatModel</code> 接口 + 9 个 <code>chat(...)</code> 方法签名 + 5 种 Content 多模态,搞懂它,后面所有高级 API 都不再神秘。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:<code>ChatModel</code> 是 LangChain4j 一切 LLM 调用的<strong>起点</strong>。其它所有 API(AI Services / Tools / Streaming)最终都委托给它。先学它最扎实。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>想象你是一个电商 Java 后端,老板说:"接入一个 AI 客服,用户问'我买的那双鞋什么时候发货',机器自动查订单 + 调 OpenAI 回答"。</p>
+  <p>第一步不是写 Agent 也不是搞 RAG,而是 —— <strong>先把一句话发给 LLM,拿到字符串回答</strong>。这一步就要用到 <code>ChatModel</code>。</p>
+
+  <h3>常见 3 个使用场景</h3>
+  <ul>
+    <li><strong>AI 客服回复</strong> — 用户问一句,模型答一句,直接展示给用户</li>
+    <li><strong>文本分类 / 情感分析</strong> — "这条评论是正向还是负向" → 单次 <code>chat()</code> 调用</li>
+    <li><strong>提示词工程实验场</strong> — 想快速试不同 prompt 效果,直接 <code>chat("translate this to French: ...")</code></li>
+  </ul>
+
+  <h2>2. 核心概念</h2>
+  <p>LangChain4j 把<strong>不同厂商的 LLM 能力</strong>抽象成几个统一接口。最低层两个:</p>
+
+  <ul>
+    <li><strong><code>LanguageModel</code></strong> — 最原始的"输入字符串、输出字符串"。<span style="color:var(--bad)">LangChain4j 已不再扩展</span>,新代码不要再用。</li>
+    <li><strong><code>ChatModel</code></strong> — 支持结构化 <code>ChatMessage</code>(用户/AI/系统/工具消息),支持多模态。⭐ <strong>官方主推,所有新功能基于它</strong>。</li>
+  </ul>
+
+  <p>围绕 ChatModel 还有 4 个旁系接口,LangChain4j 都已实现统一适配:</p>
+  <ul>
+    <li><code>EmbeddingModel</code> — 文本转向量(给 RAG 用)</li>
+    <li><code>ImageModel</code> — 图像生成(DALL·E 类)</li>
+    <li><code>ScoringModel</code> — 重排序(RAG 精排)</li>
+    <li><code>ModerationModel</code> — 内容审核</li>
+  </ul>
+
+  <h2>3. 极简调用(3 行代码)</h2>
+  <p>OpenAI 厂商的 ChatModel 创建 + 调用,最短形态:</p>
+  <pre><code><span class="cm">// 1. 用 Builder 模式构造 ChatModel</span>
+<span class="ty">ChatModel</span> model = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+        .<span class="fn">apiKey</span>(<span class="ty">System</span>.<span class="fn">getenv</span>(<span class="st">"OPENAI_API_KEY"</span>))
+        .<span class="fn">modelName</span>(<span class="st">"gpt-4o-mini"</span>)
+        .<span class="fn">build</span>();
+
+<span class="cm">// 2. 最简形态:输入字符串,返回字符串</span>
+<span class="ty">String</span> answer = model.<span class="fn">chat</span>(<span class="st">"Translate to French: hello world"</span>);
+<span class="ty">System</span>.<span class="fn">out</span>.<span class="fn">println</span>(answer);  <span class="cm">// → "Bonjour le monde"</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>4. 9 个 chat 方法签名(API 全貌)</h2>
+  <p>官方 <code>ChatModel</code> 接口提供的 9 个 <code>chat(...)</code> 重载,按"输入形态"分 4 类:</p>
+
+  <h3>类 1:字符串入参(最简)</h3>
+  <pre><code><span class="ty">String</span> <span class="fn">chat</span>(<span class="ty">String</span> userMessage);</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+  <p>直接把字符串当成 <code>UserMessage</code>,适合演示 / 一次性 prompt。</p>
+
+  <h3>类 2:多 ChatMessage 入参(对话历史)</h3>
+  <pre><code><span class="ty">ChatResponse</span> <span class="fn">chat</span>(<span class="ty">ChatMessage</span>... messages);
+<span class="ty">ChatResponse</span> <span class="fn">chat</span>(<span class="ty">List</span>&lt;<span class="ty">ChatMessage</span>&gt; messages);</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+  <p>传多个 <code>ChatMessage</code>(用户 + 系统 + AI 历史),返回 <code>ChatResponse</code>(含元数据)。</p>
+
+  <h3>类 3:ChatRequest 入参(完整控制)</h3>
+  <pre><code><span class="ty">ChatResponse</span> <span class="fn">chat</span>(<span class="ty">ChatRequest</span> request);
+<span class="ty">ChatRequest</span> <span class="ty">ChatRequest</span>.<span class="fn">builder</span>()
+        .<span class="fn">messages</span>(<span class="ty">List</span>.<span class="fn">of</span>(<span class="kw">new</span> <span class="ty">UserMessage</span>(<span class="st">"Hello"</span>)))
+        .<span class="fn">temperature</span>(<span class="nm">0.7</span>)
+        .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h3>类 4:Kotlin 协程(异步)</h3>
+  <pre><code><span class="cm">// Kotlin DSL:类型安全构建器</span>
+<span class="kw">suspend fun</span> <span class="fn">askAI</span>(prompt: <span class="ty">String</span>): <span class="ty">String</span> =
+    model.<span class="fn">chat</span> {
+        messages += <span class="ty">UserMessage</span>(prompt)
+        temperature = <span class="nm">0.7</span>
+    }</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>5. ChatMessage 4 种类型</h2>
+  <p><code>ChatMessage</code> 是消息的接口,4 个实现类:</p>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>作用</th><th>常见场景</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>UserMessage</code></td><td>用户发的消息</td><td>用户问的"什么时候发货?"</td></tr>
+      <tr><td><code>AiMessage</code></td><td>AI 返回的消息</td><td>对话历史里塞 AI 上次回答</td></tr>
+      <tr><td><code>SystemMessage</code></td><td>系统提示词</td><td>"你是一个 Java 专家,只回答 Java 问题"</td></tr>
+      <tr><td><code>ToolExecutionResultMessage</code></td><td>工具调用结果</td><td>Tools 章详细讲</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. Content 多模态(5 种)</h2>
+  <p>每条消息可以带<strong>多种内容</strong>,不只是文字。官方支持的 5 种 <code>Content</code>:</p>
+  <ul>
+    <li><strong>TextContent</strong> — 普通文本(最常用)</li>
+    <li><strong>ImageContent</strong> — 图片(支持 URL 或 Base64),用于多模态视觉问答</li>
+    <li><strong>AudioContent</strong> — 音频(部分厂商支持)</li>
+    <li><strong>VideoContent</strong> — 视频(类似 ImageContent 的二进制包装)</li>
+    <li><strong>PdfFileContent</strong> — PDF 二进制</li>
+  </ul>
+  <pre><code><span class="ty">UserMessage</span> msg = <span class="ty">UserMessage</span>.<span class="fn">from</span>(
+    <span class="ty">TextContent</span>.<span class="fn">from</span>(<span class="st">"这张图里有什么?"</span>),
+    <span class="ty">ImageContent</span>.<span class="fn">from</span>(<span class="st">"https://example.com/cat.jpg"</span>)
+);
+<span class="ty">ChatResponse</span> resp = model.<span class="fn">chat</span>(msg);</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>7. 避坑指南</h2>
+
+  <div class="pitfall">
+    <h3>坑 1 · 不要再用 LanguageModel</h3>
+    <p>LangChain4j 官方明确:已<strong>停止扩展</strong> <code>LanguageModel</code>。所有新功能只加在 <code>ChatModel</code>。新项目直接用 <code>ChatModel</code>,避免选型失败。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 2 · API Key 必须读环境变量,不要硬编码</h3>
+    <p>示例代码 <code>System.getenv("OPENAI_API_KEY")</code> 是硬规范。硬编码到源码 = 上 GitHub 后 5 分钟被盗刷,几千元账单一晚。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 3 · <code>String chat(String)</code> 不支持 system 消息</h3>
+    <p>这个最简重载<strong>只把字符串当成 UserMessage</strong>。如果你想加系统提示词,必须用 <code>chat(List&lt;ChatMessage&gt;)</code> 或 <code>chat(ChatRequest)</code>。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 4 · 多模态图片不是所有厂商都支持</h3>
+    <p><code>ImageContent</code> 要传到<strong>支持视觉的模型</strong>(gpt-4o / qwen-vl / glm-4v),纯文本模型直接抛异常。先看模型名后缀有没有 <code>-vl</code> / <code>-vision</code>。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 5 · chat() 阻塞,长 prompt 别放主线程</h3>
+    <p>单次 <code>chat()</code> 默认是同步阻塞,3-10 秒返回正常。Java Web 项目里一定要用 <code>@Async</code> 或丢线程池,否则接口超时。</p>
+  </div>
+
+  <h2>8. 记忆口诀</h2>
+  <div class="mnemonic">
+    <h3>🎓 4 行口诀</h3>
+    <pre>ChatModel 是入口,九方法签名记心头
+String 简 / List 多 / Request 全控制, 协程异步 Kotlin 兜
+Message 四型 User Ai System Tool, Content 五种 文图音视 PDF
+多模态需视觉模型, API Key 走环境变量别硬扣</pre>
+  </div>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 基础篇 · ch01 v1 浅版 · 源:<code>Chat and Language Models _ LangChain4j.html</code></p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

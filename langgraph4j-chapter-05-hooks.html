@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lg05 · 钩子 · LangGraph4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">05</span> 钩子(节点/边前后拦截器)</h1>
+    <p class="hero-sub">NodeHook × EdgeHook × 3 类型(Before / After / Wrap)× 全局 + ID 特定双注册 · 6 业务场景</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<strong>钩子 = 在节点/条件边执行前后插入自定义代码的拦截器</strong>。LangGraph4j 提供 <code>NodeHook</code> / <code>EdgeHook</code> 双接口,每个接口 3 个时机(<code>BeforeCall</code> / <code>AfterCall</code> / <code>WrapCall</code>),支持<strong>全局 + ID 特定</strong>双注册,<strong>LIFO(Before/After)/ FIFO(Wrap)</strong>不同执行顺序。</p>
+
+<p><strong>核心价值</strong>:业务核心逻辑保持"纯净"(只关注业务),日志 / 监控 / 鉴权 / 重试 / 限流 / 脱敏 / 缓存 这些"横切关注点"全部下沉到钩子里。<strong>一图顶千言</strong>:</p>
+
+<div class="svg-box">
+<svg viewBox="0 0 900 320" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;">
+  <defs>
+    <linearGradient id="before" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="node" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="after" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="wrap" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#b45309"/>
+    </linearGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+  <text x="450" y="28" text-anchor="middle" fill="#e2e8f0" font-size="16" font-weight="700">钩子 3 种拦截时机(以 NodeHook 为例)</text>
+
+  <!-- BeforeCall -->
+  <rect x="40" y="80" width="200" height="60" rx="8" fill="url(#before)"/>
+  <text x="140" y="115" text-anchor="middle" fill="#fff" font-size="14" font-weight="600">BeforeCall</text>
+  <text x="340" y="105" fill="#cbd5e1" font-size="12" font-size="11">日志/鉴权/参数校验</text>
+  <text x="340" y="125" fill="#94a3b8" font-size="10">(节点执行前)</text>
+  <line x1="240" y1="110" x2="300" y2="110" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Node -->
+  <rect x="310" y="80" width="200" height="60" rx="8" fill="url(#node)"/>
+  <text x="410" y="115" text-anchor="middle" fill="#fff" font-size="14" font-weight="600">Node 业务逻辑</text>
+
+  <!-- AfterCall -->
+  <rect x="580" y="80" width="200" height="60" rx="8" fill="url(#after)"/>
+  <text x="680" y="115" text-anchor="middle" fill="#fff" font-size="14" font-weight="600">AfterCall</text>
+  <text x="500" y="105" fill="#cbd5e1" font-size="11">埋点/缓存写入/异常捕获</text>
+  <text x="500" y="125" fill="#94a3b8" font-size="10">(节点执行后)</text>
+  <line x1="510" y1="110" x2="580" y2="110" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- WrapCall (full wrap) -->
+  <rect x="40" y="220" width="820" height="80" rx="8" fill="none" stroke="url(#wrap)" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="60" y="245" fill="#fbbf24" font-size="13" font-weight="600">WrapCall(完全包裹 · 可短路)</text>
+  <text x="60" y="270" fill="#cbd5e1" font-size="11">前置:限流/重试策略/缓存查询</text>
+  <text x="60" y="290" fill="#cbd5e1" font-size="11">后置:缓存写入/响应脱敏</text>
+  <text x="450" y="270" fill="#cbd5e1" font-size="11" text-anchor="middle">↓ 决定是否调原 action</text>
+  <text x="450" y="290" fill="#fbbf24" font-size="11" text-anchor="middle">return action.apply(...) 或 自定义结果</text>
+
+  <text x="450" y="318" text-anchor="middle" fill="#64748b" font-size="10">Before/After = 轻量附加 · WrapCall = 完整控制流</text>
+</svg>
+</div>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"咱们的 graph 跑起来黑盒 —— 谁调了哪个 node、耗时多少、报错在哪?出问题时只能看日志猜。"</p>
+
+<p><strong>解法</strong>:用 <strong>钩子</strong> —— 在节点/边执行的"前后 / 包裹"位置插入横切代码,业务核心保持纯净,所有"运维关注点"统一收口到 hook。</p>
+
+<h3>6 个钩子能解决的事</h3>
+<ul>
+  <li><strong>📋 执行日志 + 链路追踪</strong> — 每个节点耗时 + 入参出参,问题定位从"翻日志猜"到"看 span 直接定位"</li>
+  <li><strong>📊 Prometheus / Micrometer 埋点</strong> — 节点级 QPS / P99 延迟 / 错误率,接入告警系统</li>
+  <li><strong>🔐 鉴权 / 越权检查</strong> — "调 <code>delete_order</code> 节点前,检查用户角色是 admin",普通用户直接抛异常短路</li>
+  <li><strong>🔁 重试 / 限流 / 熔断</strong> — 调外部 API 失败自动重试 3 次;QPS 超阈值直接抛 <code>RateLimitExceededException</code></li>
+  <li><strong>🛡️ 数据脱敏 / PII 检测</strong> — 输出写到日志 / 推到前端前,身份证 / 手机号 / 邮箱自动脱敏为 <code>***</code></li>
+  <li><strong>🗄️ 结果缓存 / 短路返回</strong> — 同一入参命中缓存,直接返回缓存值,不调原 node(用 WrapCall 实现)</li>
+</ul>
+
+<p><strong>💡 什么时候不需要</strong>:简单 demo / 一次性脚本 / 单节点 graph(没有多节点横切需求)/ 已经用 AspectJ / Spring AOP 在更上层统一拦截(避免重复)。</p>
+
+<h2>2. 核心概念</h2>
+
+<h3>2.1 双接口 × 三时机矩阵</h3>
+<table class="compare-table">
+  <thead>
+    <tr><th>接口</th><th>时机</th><th>用途</th><th>返回</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>NodeHook.BeforeCall</code></td><td>节点执行前</td><td>日志 / 鉴权 / 参数校验</td><td><code>Map&lt;String,Object&gt;</code>(注入到 state)</td></tr>
+    <tr><td><code>NodeHook.AfterCall</code></td><td>节点执行后</td><td>埋点 / 缓存写入 / 异常捕获</td><td><code>Map&lt;String,Object&gt;</code>(注入到 state)</td></tr>
+    <tr><td><code>NodeHook.WrapCall</code></td><td>完整包裹</td><td>限流 / 重试 / 缓存短路</td><td><code>Map&lt;String,Object&gt;</code>(完全控制)</td></tr>
+    <tr><td><code>EdgeHook.BeforeCall</code></td><td>边执行前</td><td>条件边的参数校验</td><td><code>Command</code></td></tr>
+    <tr><td><code>EdgeHook.AfterCall</code></td><td>边执行后</td><td>路由结果审计</td><td><code>Command</code></td></tr>
+    <tr><td><code>EdgeHook.WrapCall</code></td><td>完整包裹</td><td>条件边的缓存 / 重试</td><td><code>Command</code></td></tr>
+  </tbody>
+</table>
+
+<h3>2.2 双注册方式(全局 + ID 特定)</h3>
+<div class="svg-box">
+<svg viewBox="0 0 900 280" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;">
+  <text x="450" y="28" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">钩子注册作用域(全局 vs ID 特定)</text>
+
+  <!-- Global -->
+  <rect x="40" y="60" width="380" height="200" rx="10" fill="#1e293b" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="230" y="88" text-anchor="middle" fill="#a78bfa" font-size="13" font-weight="600">🌐 全局钩子(Global)</text>
+  <text x="230" y="108" text-anchor="middle" fill="#cbd5e1" font-size="11">addBeforeCallNodeHook(hook)</text>
+  <rect x="60" y="125" width="100" height="40" rx="6" fill="#3b82f6"/>
+  <text x="110" y="150" text-anchor="middle" fill="#fff" font-size="11">nodeA</text>
+  <rect x="170" y="125" width="100" height="40" rx="6" fill="#3b82f6"/>
+  <text x="220" y="150" text-anchor="middle" fill="#fff" font-size="11">nodeB</text>
+  <rect x="280" y="125" width="100" height="40" rx="6" fill="#3b82f6"/>
+  <text x="330" y="150" text-anchor="middle" fill="#fff" font-size="11">nodeC</text>
+  <text x="60" y="195" fill="#cbd5e1" font-size="11">✓ 所有节点都触发</text>
+  <text x="60" y="215" fill="#94a3b8" font-size="10">典型场景:统一日志、链路追踪 ID 注入</text>
+  <text x="60" y="235" fill="#94a3b8" font-size="10">性能埋点(Prometheus counter)</text>
+
+  <!-- ID-specific -->
+  <rect x="480" y="60" width="380" height="200" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+  <text x="670" y="88" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="600">🎯 ID 特定钩子(Per-ID)</text>
+  <text x="670" y="108" text-anchor="middle" fill="#cbd5e1" font-size="11">addBeforeCallNodeHook("nodeB", hook)</text>
+  <rect x="500" y="125" width="100" height="40" rx="6" fill="#475569"/>
+  <text x="550" y="150" text-anchor="middle" fill="#94a3b8" font-size="11">nodeA</text>
+  <rect x="610" y="125" width="100" height="40" rx="6" fill="#f59e0b"/>
+  <text x="660" y="150" text-anchor="middle" fill="#fff" font-size="11">nodeB ⭐</text>
+  <rect x="720" y="125" width="100" height="40" rx="6" fill="#475569"/>
+  <text x="770" y="150" text-anchor="middle" fill="#94a3b8" font-size="11">nodeC</text>
+  <text x="500" y="195" fill="#cbd5e1" font-size="11">✓ 只对 nodeB 触发</text>
+  <text x="500" y="215" fill="#94a3b8" font-size="10">典型场景:鉴权(只对 delete_order 节点)</text>
+  <text x="500" y="235" fill="#94a3b8" font-size="10">慢查询重试(只对调外部 API 的节点)</text>
+
+  <text x="450" y="272" text-anchor="middle" fill="#64748b" font-size="10">两者可同时注册(全局 + ID 特定叠加)</text>
+</svg>
+</div>
+
+<h3>2.3 执行顺序:Before/After LIFO vs Wrap FIFO</h3>
+<div class="callout warn">
+<p><strong>⚠️ 顺序坑</strong>:同一节点注册多个 hook 时:<code>BeforeCall</code> 和 <code>AfterCall</code> 走 <strong>LIFO</strong>(后注册先执行,像 try/finally 反过来);<code>WrapCall</code> 走 <strong>FIFO</strong>(先注册先包裹,像洋葱层)。<strong>混用时先 Wrap 再 Before/After</strong>,记不住就画洋葱图。</p>
+</div>
+
+<h2>3. 极简调用(3 行注册全局日志钩子)</h2>
+<p>最小可运行 demo,注册一个全局 BeforeCall,所有节点执行前打印入参:</p>
+
+<pre><code class="language-java">import org.bsc.langgraph4j.hook.NodeHook;
+import org.bsc.langgraph4j.RunnableConfig;
+
+NodeHook.BeforeCall&lt;State&gt; loggingHook = (nodeId, state, config) -&gt; {
+    System.out.println("[BEFORE] node=" + nodeId + " input=" + state);
+    return CompletableFuture.completedFuture(Map.of()); // 空 map = 不注入新 state
+};
+
+var graph = new StateGraph(State::new)
+    .addNode("process", processNode)
+    .addBeforeCallNodeHook(loggingHook)   // ← 一行注册全局钩子
+    .addEdge(START, "process")
+    .addEdge("process", END)
+    .compile();</code></pre>
+
+<p>跑起来,每次进入 <code>process</code> 节点都会先打印 <code>[BEFORE] node=process input=...</code>。<strong>业务代码一行没改</strong>。</p>
+
+<h2>4. NodeHook 3 类型实战</h2>
+
+<h3>4.1 BeforeCall:全局日志 + 链路追踪 ID 注入</h3>
+<pre><code class="language-java">// 全局 BeforeCall:每个节点执行前注入 traceId + 打日志
+NodeHook.BeforeCall&lt;State&gt; traceHook = (nodeId, state, config) -&gt; {
+    String traceId = config.threadId().orElse(UUID.randomUUID().toString());
+    System.out.printf("[%s] → node=%s, state=%s%n", traceId, nodeId, state);
+    // 把 traceId 注入 state,后续节点可读取
+    return CompletableFuture.completedFuture(Map.of("_traceId", traceId));
+};
+
+var graph = new StateGraph(State::new)
+    .addNode("step1", step1Node)
+    .addNode("step2", step2Node)
+    .addBeforeCallNodeHook(traceHook)  // ← 全局注册
+    .addEdge(START, "step1")
+    .addEdge("step1", "step2")
+    .addEdge("step2", END)
+    .compile();</code></pre>
+
+<h3>4.2 AfterCall:Prometheus 埋点 + 异常捕获</h3>
+<pre><code class="language-java">// 全局 AfterCall:节点执行后上报耗时
+NodeHook.AfterCall&lt;State&gt; metricsHook = (nodeId, state, config, lastResult) -&gt; {
+    long startNs = (long) state.value("_nodeStartNs").orElse(System.nanoTime());
+    long elapsedMs = (System.nanoTime() - startNs) / 1_000_000;
+    metricsRegistry.counter("graph.node.invoke", "node", nodeId).increment();
+    metricsRegistry.histogram("graph.node.latency", "node", nodeId)
+                   .record(elapsedMs, TimeUnit.MILLISECONDS);
+    System.out.printf("[METRIC] node=%s 耗时=%dms%n", nodeId, elapsedMs);
+    return CompletableFuture.completedFuture(Map.of());
+};
+
+// 在 BeforeCall 里同时记录开始时间
+NodeHook.BeforeCall&lt;State&gt; startTimeHook = (nodeId, state, config) -&gt; {
+    return CompletableFuture.completedFuture(
+        Map.of("_nodeStartNs", System.nanoTime())
+    );
+};
+
+var graph = new StateGraph(State::new)
+    .addBeforeCallNodeHook(startTimeHook)   // ← 先记录开始时间
+    .addAfterCallNodeHook(metricsHook)      // ← 再上报耗时
+    .addNode("a", aNode)
+    .addNode("b", bNode)
+    .addEdge(START, "a")
+    .addEdge("a", "b")
+    .addEdge("b", END)
+    .compile();</code></pre>
+
+<h3>4.3 WrapCall:缓存短路 + 重试</h3>
+<pre><code class="language-java">// WrapCall:同一入参命中缓存,直接返回缓存值,不调原节点
+NodeHook.WrapCall&lt;State&gt; cacheWrapHook = (nodeId, state, config, action) -&gt; {
+    String key = nodeId + ":" + state.input().orElse("");
+    if (cache.containsKey(key)) {
+        System.out.println("[CACHE HIT] " + key);
+        return CompletableFuture.completedFuture(cache.get(key));  // ← 短路,action 不执行
+    }
+    return action.apply(nodeId, state, config)   // ← 调原 action
+        .thenApply(result -&gt; {
+            cache.put(key, result);
+            return result;
+        });
+};
+
+var graph = new StateGraph(State::new)
+    .addWrapCallNodeHook(cacheWrapHook)   // ← 包裹式拦截
+    .addNode("expensive", expensiveNode)
+    .addEdge(START, "expensive")
+    .addEdge("expensive", END)
+    .compile();</code></pre>
+
+<h2>5. EdgeHook:条件边的钩子</h2>
+
+<p>EdgeHook 只对<strong>条件边</strong>生效(普通 <code>addEdge(src, dst)</code> 静态边没有 hook 时机)。Edge 返回 <code>Command</code>(包含 next nodeId + state update),可以拦截路由决策。</p>
+
+<pre><code class="language-java">// 场景:订单路由条件边 - 用户是 VIP 才走"快速通道"
+EdgeHook.BeforeCall&lt;State&gt; routeAuditHook = (sourceId, state, config) -&gt; {
+    System.out.println("[ROUTE] 从 " + sourceId + " 出发, state=" + state);
+    return CompletableFuture.completedFuture(null);  // 不修改路由
+};
+
+// ID 特定:只对 "decide_route" 这条边生效,其他条件边不受影响
+var graph = new StateGraph(State::new)
+    .addNode("check_user", checkUserNode)
+    .addNode("fast_path", fastPathNode)
+    .addNode("slow_path", slowPathNode)
+    .addConditionalEdges("check_user",
+        state -&gt; state.isVip() ? "fast" : "slow",
+        Map.of("fast", "fast_path", "slow", "slow_path"))
+    .addBeforeCallEdgeHook("decide_route", routeAuditHook)  // ← 只对 decide_route 生效
+    .addEdge(START, "check_user")
+    .addEdge("fast_path", END)
+    .addEdge("slow_path", END)
+    .compile();</code></pre>
+
+<h2>6. 实战:WMS 智能调度 + 钩子组合(6 业务场景落地)</h2>
+
+<p>跨境电商 WMS 系统,有这些横切关注点,全部用钩子收口:<strong>日志 + 鉴权 + 限流 + 重试 + 脱敏 + 缓存</strong>。</p>
+
+<h3>WMS 业务场景映射</h3>
+<table class="compare-table">
+  <thead>
+    <tr><th>业务场景</th><th>钩子类型</th><th>实现要点</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>📋 所有节点执行日志</td><td>全局 <code>BeforeCall</code></td><td>打印 nodeId + traceId + 输入参数</td></tr>
+    <tr><td>🔐 危险节点鉴权</td><td>ID 特定 <code>BeforeCall</code></td><td><code>delete_order</code> / <code>manual_override</code> 节点检查 user role</td></tr>
+    <tr><td>📊 Prometheus 埋点</td><td>全局 <code>AfterCall</code></td><td>QPS / P99 / 错误率</td></tr>
+    <tr><td>🔁 外部 API 重试</td><td>ID 特定 <code>WrapCall</code></td><td>调三方物流 API 失败重试 3 次</td></tr>
+    <tr><td>🛡️ PII 脱敏</td><td>全局 <code>AfterCall</code></td><td>state 里手机号/身份证 → <code>138****1234</code></td></tr>
+    <tr><td>🗄️ 调度结果缓存</td><td>ID 特定 <code>WrapCall</code></td><td>同 SKU + 同仓库 5 分钟内不重复算</td></tr>
+  </tbody>
+</table>
+
+<h3>完整代码</h3>
+<pre><code class="language-java">// ============ 1. 全局日志钩子 ============
+NodeHook.BeforeCall&lt;WmsState&gt; wmsLogHook = (nodeId, state, config) -&gt; {
+    String traceId = config.threadId().orElse("n/a");
+    log.info("[WMS][{}] → node={}, input={}", traceId, nodeId, state.input());
+    return CompletableFuture.completedFuture(Map.of("_traceId", traceId));
+};
+
+// ============ 2. 危险节点鉴权(ID 特定) ============
+NodeHook.BeforeCall&lt;WmsState&gt; adminOnlyHook = (nodeId, state, config) -&gt; {
+    String userRole = state.userRole().orElse("guest");
+    if (!"admin".equals(userRole)) {
+        throw new SecurityException("节点 " + nodeId + " 需要 admin 权限,当前: " + userRole);
+    }
+    return CompletableFuture.completedFuture(Map.of());
+};
+
+// ============ 3. Prometheus 埋点(全局 AfterCall) ============
+NodeHook.AfterCall&lt;WmsState&gt; metricsHook = (nodeId, state, config, lastResult) -&gt; {
+    long start = (long) state.value("_nodeStartNs").orElse(System.nanoTime());
+    long elapsed = (System.nanoTime() - start) / 1_000_000;
+    Counter.builder("wms_node_invoke_total").tag("node", nodeId).register(registry).increment();
+    Timer.builder("wms_node_latency_ms").tag("node", nodeId).register(registry)
+         .record(elapsed, TimeUnit.MILLISECONDS);
+    return CompletableFuture.completedFuture(Map.of());
+};
+
+// ============ 4. 外部 API 重试(ID 特定 WrapCall) ============
+NodeHook.WrapCall&lt;WmsState&gt; carrierApiRetryHook = (nodeId, state, config, action) -&gt; {
+    int maxRetry = 3;
+    for (int i = 0; i &lt; maxRetry; i++) {
+        try {
+            return action.apply(nodeId, state, config);
+        } catch (Exception e) {
+            if (i == maxRetry - 1) throw new RuntimeException("调用承运商 API 失败", e);
+            try { Thread.sleep(1000L * (i + 1)); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            log.warn("[WMS] {} 第 {} 次重试", nodeId, i + 1);
+        }
+    }
+    return CompletableFuture.completedFuture(Map.of());
+};
+
+// ============ 5. PII 脱敏(全局 AfterCall) ============
+NodeHook.AfterCall&lt;WmsState&gt; piiMaskHook = (nodeId, state, config, lastResult) -&gt; {
+    Map&lt;String, Object&gt; masked = new HashMap&lt;&gt;(lastResult);
+    masked.replaceAll((k, v) -&gt; v instanceof String s ? maskPii(s) : v);
+    return CompletableFuture.completedFuture(masked);
+};
+private static String maskPii(String s) {
+    return s.replaceAll("(\\d{3})\\d{4}(\\d{4})", "$1****$2")  // 手机号
+            .replaceAll("(\\d{4})\\d{10}(\\w{4})", "$1**********$2"); // 身份证
+}
+
+// ============ 6. 调度结果缓存(ID 特定 WrapCall) ============
+LoadingCache&lt;String, Map&lt;String, Object&gt;&gt; scheduleCache = Caffeine.newBuilder()
+    .expireAfterWrite(5, TimeUnit.MINUTES).maximumSize(10_000).build();
+
+NodeHook.WrapCall&lt;WmsState&gt; scheduleCacheHook = (nodeId, state, config, action) -&gt; {
+    if (!"ai_schedule".equals(nodeId)) return action.apply(nodeId, state, config);
+    String cacheKey = state.sku() + ":" + state.warehouseId();
+    Map&lt;String, Object&gt; cached = scheduleCache.getIfPresent(cacheKey);
+    if (cached != null) {
+        log.info("[WMS][CACHE HIT] {}", cacheKey);
+        return CompletableFuture.completedFuture(cached);
+    }
+    return action.apply(nodeId, state, config).thenApply(r -&gt; {
+        scheduleCache.put(cacheKey, r);
+        return r;
+    });
+};
+
+// ============ 7. 注册所有钩子到 StateGraph ============
+var graph = new StateGraph(WmsState::new)
+    .addNode("validate_order", validateOrderNode)
+    .addNode("ai_schedule", aiScheduleNode)
+    .addNode("manual_override", manualOverrideNode)
+    .addNode("call_carrier_api", callCarrierApiNode)
+
+    // 全局钩子(对所有节点生效)
+    .addBeforeCallNodeHook(wmsLogHook)
+    .addAfterCallNodeHook(metricsHook)
+    .addAfterCallNodeHook(piiMaskHook)
+
+    // ID 特定钩子(只对特定节点生效)
+    .addBeforeCallNodeHook("manual_override", adminOnlyHook)
+    .addWrapCallNodeHook("call_carrier_api", carrierApiRetryHook)
+    .addWrapCallNodeHook("ai_schedule", scheduleCacheHook)
+
+    .addEdge(START, "validate_order")
+    .addEdge("validate_order", "ai_schedule")
+    .addEdge("ai_schedule", "call_carrier_api")
+    .addEdge("call_carrier_api", END)
+    .addEdge("manual_override", END)
+    .compile();</code></pre>
+
+<p>这一段代码覆盖了 6 个业务场景的横切关注点,<strong>业务节点本身(validateOrderNode / aiScheduleNode)只关注核心逻辑</strong>,日志 / 鉴权 / 埋点 / 限流 / 脱敏 / 缓存全部通过钩子外挂 —— 加新节点时,横切逻辑自动生效。</p>
+
+<h2>7. 决策树(用 Before/After 还是 Wrap?)</h2>
+<div class="svg-box">
+<svg viewBox="0 0 900 280" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;">
+  <text x="450" y="25" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">钩子类型决策树</text>
+  <rect x="350" y="50" width="200" height="45" rx="8" fill="#8b5cf6"/>
+  <text x="450" y="78" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">要拦截节点吗?</text>
+  <line x1="450" y1="95" x2="450" y2="115" stroke="#94a3b8" stroke-width="2"/>
+  <text x="455" y="110" fill="#cbd5e1" font-size="10">↓ 否(只关心路由)</text>
+
+  <rect x="650" y="120" width="200" height="45" rx="8" fill="#3b82f6"/>
+  <text x="750" y="148" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">用 EdgeHook</text>
+
+  <line x1="450" y1="95" x2="450" y2="115" stroke="#94a3b8" stroke-width="2"/>
+  <text x="455" y="110" fill="#cbd5e1" font-size="10">↓ 是</text>
+  <line x1="350" y1="115" x2="170" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="350" y1="115" x2="450" y2="140" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="50" y="140" width="240" height="45" rx="8" fill="#3b82f6"/>
+  <text x="170" y="168" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">需要"完全控制"原 action 吗?</text>
+
+  <rect x="330" y="140" width="240" height="45" rx="8" fill="#3b82f6"/>
+  <text x="450" y="168" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">需要修改入参 / state 吗?</text>
+
+  <line x1="170" y1="185" x2="170" y2="210" stroke="#94a3b8" stroke-width="2"/>
+  <text x="175" y="205" fill="#cbd5e1" font-size="10">↓ 否</text>
+  <line x1="450" y1="185" x2="450" y2="210" stroke="#94a3b8" stroke-width="2"/>
+  <text x="455" y="205" fill="#cbd5e1" font-size="10">↓ 否(只读)</text>
+
+  <rect x="50" y="215" width="240" height="40" rx="8" fill="#10b981"/>
+  <text x="170" y="240" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">✓ WrapCall(限流/重试/缓存)</text>
+  <rect x="330" y="215" width="240" height="40" rx="8" fill="#10b981"/>
+  <text x="450" y="240" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">✓ BeforeCall(日志/鉴权/校验)</text>
+
+  <line x1="450" y1="115" x2="730" y2="115" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="730" y1="115" x2="730" y2="120" stroke="#94a3b8" stroke-width="2"/>
+</svg>
+</div>
+
+<h2>8. 5 个避坑</h2>
+
+<div class="callout warn">
+<p><strong>❶ BeforeCall / AfterCall LIFO,WrapCall FIFO —— 顺序错了行为完全不同</strong></p>
+<p>注册 <code>hookA</code> 再注册 <code>hookB</code>,BeforeCall 执行顺序是 B → A(后注册先跑,像栈);WrapCall 是 A → B(像洋葱层)。混用日志钩子和监控钩子时,<strong>先在纸上画洋葱图</strong>,否则日志时间戳和监控耗时对不上。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❷ hook 抛异常会中断整个 graph 执行,不会继续下一个节点</strong></p>
+<p>在 <code>BeforeCall</code> 里抛 <code>SecurityException</code> 鉴权失败,<strong>整个 graph 直接失败</strong>,不会"跳过这个节点去下一个"。<strong>要想跳过/路由分支,必须用 WrapCall 返回不同 result</strong>,而不是抛异常。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❸ WrapCall 里忘了调 <code>action.apply(...)</code>,节点永远不执行</strong></p>
+<p>WrapCall 拿到的是 <code>action</code> 引用,<strong>不显式调用 action.apply 就不执行原节点</strong>(缓存命中短路除外)。常见 bug:复制 WrapCall 模板忘了改 return 语句,所有节点返回空 Map。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❹ 全局钩子对所有节点生效,包括 START 和 END 的"伪节点"</strong></p>
+<p>注册全局 BeforeCall 后,每次图执行都会触发 <code>START</code> 和 <code>END</code> 两个特殊节点的 hook(它们的 nodeId 是 <code>"__START__"</code> / <code>"__END__"</code>)。<strong>在 hook 里加 if 判断</strong>:<code>if ("__START__".equals(nodeId)) return Map.of();</code></p>
+</div>
+
+<div class="callout warn">
+<p><strong>❺ EdgeHook 只对条件边生效,对静态 <code>addEdge(src, dst)</code> 不触发</strong></p>
+<p>静态边没有 hook 时机(因为没有"计算过程")。<strong>要给静态边加审计,得改成条件边</strong>(lambda 始终返回 <code>dst</code>,但有 hook 时机)。</p>
+</div>
+
+<h2>9. 速查表</h2>
+<table class="compare-table">
+  <thead>
+    <tr><th>API</th><th>签名</th><th>用途</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>addBeforeCallNodeHook(hook)</code></td><td>全局注册</td><td>所有节点执行前</td></tr>
+    <tr><td><code>addBeforeCallNodeHook(nodeId, hook)</code></td><td>ID 特定</td><td>指定节点执行前</td></tr>
+    <tr><td><code>addAfterCallNodeHook(hook)</code></td><td>全局</td><td>所有节点执行后</td></tr>
+    <tr><td><code>addAfterCallNodeHook(nodeId, hook)</code></td><td>ID 特定</td><td>指定节点执行后</td></tr>
+    <tr><td><code>addWrapCallNodeHook(hook)</code></td><td>全局</td><td>包裹所有节点</td></tr>
+    <tr><td><code>addWrapCallNodeHook(nodeId, hook)</code></td><td>ID 特定</td><td>包裹指定节点</td></tr>
+    <tr><td><code>addBeforeCallEdgeHook(...)</code></td><td>同 Node</td><td>条件边前</td></tr>
+    <tr><td><code>addAfterCallEdgeHook(...)</code></td><td>同 Node</td><td>条件边后</td></tr>
+    <tr><td><code>addWrapCallEdgeHook(...)</code></td><td>同 Node</td><td>包裹条件边</td></tr>
+  </tbody>
+</table>
+
+<h2>10. 本章小结</h2>
+<blockquote>
+<p><strong>钩子 = 横切关注点外挂层</strong>。<code>NodeHook</code> × <code>EdgeHook</code> × 3 时机 × 全局 / ID 特定,组合出"业务纯净 + 运维全能"的图系统。</p>
+<p>下一章 <strong>lg06 · 取消</strong>:长跑节点怎么中途取消(超时 / 用户取消 / 异常信号),配合钩子实现"调外部 API 超 5 秒自动取消 + 状态自动回滚"。</p>
+</blockquote>
+
+</main>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

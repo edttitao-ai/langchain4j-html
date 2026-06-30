@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch09 · Image Models · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">多模态图像 · 视觉问答</span>
+    <h1><span class="num">09</span>Image Models(图像模型)</h1>
+    <p class="lead">LLM 不只看文字,还能"看"图片。<code>ImageModel</code> 生成图(DALL·E 类),<code>ImageContent</code> 喂图给 LLM(gpt-4o vision 类)。本章讲 LangChain4j 抽象的<strong>图像能力全集</strong>(基础篇收官章)。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:LangChain4j 把图像能力分<strong>两类</strong>:① 图像<strong>生成</strong>(<code>ImageModel</code>,DALL·E / 通义万相)② 图像<strong>理解</strong>(<code>ImageContent</code> 配合支持视觉的 ChatModel,gpt-4o / qwen-vl)。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>老板:"我们 AI 客服要能<strong>看图</strong>。用户发来一张破损商品的照片,要能识别破损程度 + 触发售后流程。"</p>
+  <p>这就是<strong>多模态视觉问答</strong>(Visual QA)。LLM 不直接处理像素,但支持视觉的模型能把图转成"我看到的"自然语言,LLM 再按自然语言推理。</p>
+
+  <h3>3 个真实场景</h3>
+  <ul>
+    <li><strong>电商售后看图</strong> — 用户发破损商品图,AI 识别 + 触发退款</li>
+    <li><strong>AI 海报生成</strong> — "给我画一张春节促销海报" → DALL·E 输出</li>
+    <li><strong>商品图理解</strong> — 上传商品图,自动生成标题 / 描述 / 标签</li>
+  </ul>
+
+  <h2>2. 2 类图像能力</h2>
+  <table>
+    <thead>
+      <tr><th>能力</th><th>对应接口</th><th>代表模型</th><th>方向</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>图像生成</strong></td><td><code>ImageModel</code></td><td>DALL·E 3 / 通义万相 / Imagen</td><td>文字 → 图</td></tr>
+      <tr><td><strong>图像理解</strong></td><td><code>ChatModel + ImageContent</code></td><td>gpt-4o-vision / qwen-vl / glm-4v</td><td>图 + 文字 → 文字</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 能力 ①:图像生成(ImageModel)</h2>
+  <p>OpenAI DALL·E 3 案例 — 文字描述生成图片:</p>
+  <pre><code><span class="ty">ImageModel</span> imageModel = <span class="ty">OpenAiImageModel</span>.<span class="fn">builder</span>()
+        .<span class="fn">apiKey</span>(<span class="ty">System</span>.<span class="fn">getenv</span>(<span class="st">"OPENAI_API_KEY"</span>))
+        .<span class="fn">modelName</span>(<span class="st">"dall-e-3"</span>)
+        .<span class="fn">size</span>(<span class="st">"1024x1024"</span>)
+        .<span class="fn">quality</span>(<span class="st">"hd"</span>)
+        .<span class="fn">build</span>();
+
+<span class="ty">Response</span>&lt;<span class="ty">Image</span>&gt; response = imageModel.<span class="fn">generate</span>(<span class="st">"A white cat sitting on a red sofa, oil painting style"</span>);
+
+<span class="ty">Image</span> image = response.<span class="fn">content</span>();
+<span class="ty">String</span> base64Data = image.<span class="fn">base64Data</span>();
+<span class="ty">String</span> mimeType   = image.<span class="fn">mimeType</span>();   <span class="cm">// "image/png"</span>
+<span class="ty">String</span> revisedPrompt = response.<span class="fn">revisedPrompt</span>();   <span class="cm">// DALL·E 实际用的 prompt</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>4. 能力 ②:图像理解(ImageContent)</h2>
+  <p>把图片 + 文字一起发给支持视觉的 ChatModel(gpt-4o / qwen-vl / glm-4v):</p>
+  <pre><code><span class="ty">ChatModel</span> visionModel = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+        .<span class="fn">apiKey</span>(<span class="ty">System</span>.<span class="fn">getenv</span>(<span class="st">"OPENAI_API_KEY"</span>))
+        .<span class="fn">modelName</span>(<span class="st">"gpt-4o"</span>)             <span class="cm">// ⭐ 要视觉模型</span>
+        .<span class="fn">build</span>();
+
+<span class="cm">// 方式 1:网络 URL</span>
+<span class="ty">ImageContent</span> image = <span class="ty">ImageContent</span>.<span class="fn">from</span>(<span class="st">"https://example.com/damaged-product.jpg"</span>);
+
+<span class="cm">// 方式 2:本地文件 → Base64</span>
+<span class="ty">byte</span>[] bytes = <span class="ty">Files</span>.<span class="fn">readAllBytes</span>(<span class="ty">Paths</span>.<span class="fn">get</span>(<span class="st">"broken.jpg"</span>));
+<span class="ty">String</span> base64 = <span class="ty">Base64</span>.<span class="fn">getEncoder</span>().<span class="fn">encodeToString</span>(bytes);
+<span class="ty">ImageContent</span> image = <span class="ty">ImageContent</span>.<span class="fn">from</span>(base64, <span class="st">"image/jpeg"</span>);
+
+<span class="cm">// 提问</span>
+<span class="ty">UserMessage</span> msg = <span class="ty">UserMessage</span>.<span class="fn">from</span>(
+    <span class="ty">TextContent</span>.<span class="fn">from</span>(<span class="st">"这张图里商品破损程度如何?需要退款吗?"</span>),
+    image
+);
+<span class="ty">ChatResponse</span> resp = visionModel.<span class="fn">chat</span>(msg);
+<span class="ty">System</span>.<span class="fn">out</span>.<span class="fn">println</span>(resp.<span class="fn">aiMessage</span>().<span class="fn">text</span>());</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>5. 多模态实战:破损商品售后</h2>
+  <p>完整业务场景 —— 用户上传图,AI 识别 + 触发流程:</p>
+  <pre><code><span class="kw">interface</span> <span class="ty">DamageAssessor</span> {
+    <span class="at">@UserMessage</span>(<span class="st">"""</span>
+        <span class="st">你是电商售后 AI。请根据用户上传的商品图片判断:</span>
+        <span class="st">1. 破损等级(SEVERE 重度 / MODERATE 中度 / MINOR 轻微 / NONE 无)</span>
+        <span class="st">2. 是否建议全额退款(true/false)</span>
+        <span class="st">3. 简要原因(一句话)</span>
+        <span class="st">"""</span>)
+    <span class="ty">DamageReport</span> <span class="fn">assessDamage</span>(<span class="at">@V</span>(<span class="st">"image"</span>) <span class="ty">ImageContent</span> image);
+}
+
+<span class="kw">record</span> <span class="ty">DamageReport</span>(
+    <span class="ty">DamageLevel</span> level,
+    <span class="ty">boolean</span> fullRefund,
+    <span class="ty">String</span> reason
+) {}
+
+<span class="kw">enum</span> <span class="ty">DamageLevel</span> { <span class="at">SEVERE</span>, <span class="at">MODERATE</span>, <span class="at">MINOR</span>, <span class="at">NONE</span> }
+
+<span class="cm">// 配置模型要支持视觉 + JSON Schema</span>
+<span class="ty">DamageAssessor</span> assessor = <span class="ty">AiServices</span>.<span class="fn">builder</span>(<span class="ty">DamageAssessor</span>.<span class="kw">class</span>)
+        .<span class="fn">chatModel</span>(visionModel)              <span class="cm">// gpt-4o</span>
+        .<span class="fn">supportedCapabilities</span>(<span class="ty">RESPONSE_FORMAT_JSON_SCHEMA</span>)
+        .<span class="fn">strictJsonSchema</span>(<span class="kw">true</span>)
+        .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>6. 5 种 Content 类型(回顾 ch01)</h2>
+  <p>LangChain4j 不只支持图片,完整多模态体系:</p>
+  <ul>
+    <li><code>TextContent</code> — 文本(最常用)</li>
+    <li><code>ImageContent</code> — 图片(URL / Base64)</li>
+    <li><code>AudioContent</code> — 音频(部分厂商支持)</li>
+    <li><code>VideoContent</code> — 视频(类似 ImageContent 的二进制包装)</li>
+    <li><code>PdfFileContent</code> — PDF 二进制</li>
+  </ul>
+
+  <h2>7. 选型决策</h2>
+  <div class="svg-box">
+    <svg viewBox="0 0 720 240" xmlns="http://www.w3.org/2000/svg">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">"我要生成图 还是 理解图?"</text>
+
+      <rect x="280" y="40" width="160" height="36" rx="8" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+      <text x="360" y="62" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">判断方向</text>
+
+      <line x1="360" y1="76" x2="120" y2="120" stroke="#94a3b8" stroke-width="1"/>
+      <line x1="360" y1="76" x2="600" y2="120" stroke="#94a3b8" stroke-width="1"/>
+
+      <text x="220" y="100" font-size="12" font-weight="600" fill="#15803d">文字 → 图</text>
+      <text x="500" y="100" font-size="12" font-weight="600" fill="#b45309">图 + 文字 → 文字</text>
+
+      <rect x="40" y="130" width="160" height="80" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+      <text x="120" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">ImageModel</text>
+      <text x="120" y="172" text-anchor="middle" font-size="11" fill="#334155">· AI 海报生成</text>
+      <text x="120" y="188" text-anchor="middle" font-size="11" fill="#334155">· 商品图设计</text>
+      <text x="120" y="204" text-anchor="middle" font-size="11" fill="#334155">· 风格转换</text>
+
+      <rect x="520" y="130" width="160" height="80" rx="8" fill="#fff4e6" stroke="#e07a3b" stroke-width="1"/>
+      <text x="600" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#b45309">ChatModel + ImageContent</text>
+      <text x="600" y="172" text-anchor="middle" font-size="11" fill="#334155">· 售后看图</text>
+      <text x="600" y="188" text-anchor="middle" font-size="11" fill="#334155">· 视觉问答</text>
+      <text x="600" y="204" text-anchor="middle" font-size="11" fill="#334155">· 商品识别</text>
+    </svg>
+  </div>
+
+  <h2>8. 避坑指南</h2>
+
+  <div class="pitfall">
+    <h3>坑 1 · 模型名不区分 = 视觉能力直接消失</h3>
+    <p>同样 "<code>gpt-4o</code>" 和 "<code>gpt-4o-mini</code>",前者有视觉,后者<strong>部分场景</strong>视觉弱。国产 qwen2.5 不带 "-vl" 后缀就不看图。<strong>调用前确认模型支持视觉</strong>(看厂商文档的"vision / multimodal"列)。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 2 · 大图不压缩 = 烧光 token</h3>
+    <p>用户发 10MB 原图,你直接喂给 LLM = 模型按图像 token 计费,可能几千 token 就为了一张图。<strong>先压缩到 1024px 长边 + JPEG 80%</strong>,既够模型看清又省 token。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 3 · URL 图片 = LLM 服务要去 fetch</h3>
+    <p><code>ImageContent.from("https://...")</code> 内部会让 LLM 服务去下载图。<strong>如果 LLM 服务在境外 / 有防火墙 / URL 限流</strong>,会失败或超时。生产<strong>永远用 Base64 嵌入</strong>(预下载 + 转码)。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 4 · DALL·E 3 自动改写 prompt</h3>
+    <p><code>response.revisedPrompt()</code> 返回的"实际用的 prompt"跟你给的"原始 prompt"经常不一样(DALL·E 内部会改写以提高质量)。不要在审计日志里只存原始 prompt,<strong>两者都存</strong>。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 5 · 图片理解 ≠ 精确 OCR</h3>
+    <p>LLM 看图能"理解大致内容",但对<strong>小字 / 表格 / 数字</strong>识别准确率不如专业 OCR(百度 / 腾讯 / PaddleOCR)。如果业务是"提取图里身份证号",先 OCR 拿文字再喂 LLM 更靠谱。</p>
+  </div>
+
+  <h2>9. 记忆口诀</h2>
+  <div class="mnemonic">
+    <h3>🎓 4 行口诀</h3>
+    <pre>图像两能力 生成 和 理解, ImageModel 出图 ImageContent 进 LLM
+视觉模型看名字后缀, gpt-4o / qwen-vl / glm-4v
+大图先压 1024px JPEG 80, 省 token 防超时
+URL 不稳走 Base64, 精确 OCR 走专业模型</pre>
+  </div>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 基础篇 · ch09 v1 浅版 · 源:<code>Image Models _ LangChain4j.html</code>(1.4MB / 仅 1 段,内容基于 ch01 ImageContent 体系展开)</p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

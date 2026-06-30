@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch15 · Agents and Agentic AI · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">15</span>Agents and Agentic AI(把 LLM 装进团队)</h1>
+    <p class="hero-sub">8 大工作流模式 · AgenticScope 共享 · Supervisor / HITL / Voting · 业务级 Agent 编排</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<code>AgenticServices</code> 7 大 builder + <code>AgenticScope</code> 共享数据 + <code>@Agent</code> 注解 = <strong>把多个 LLM Agent 编排成"能干活的 AI 团队"</strong>。Sequential 串行 / Loop 循环 / Parallel 并行 / Conditional 条件路由 / Supervisor 监督决策 / Blackboard 黑板协调 / HITL 人工介入 / Voting 多模型投票。<strong>做企业级复杂任务(选品 / 客服 / 审核 / 批量),Agent 是 99% 的正解</strong>。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"我们客服 AI 什么都答不好 —— 客户问退换政策,AI 答错条款;问物流,AI 编单号;问商品质量,AI 给出 2023 年的旧评测。能不能让 AI <strong>专人专岗</strong>?"</p>
+
+<p><strong>❌ 单 AI 死循环</strong>(一个万能 Agent 什么都干,什么都干不好):</p>
+
+<pre><code>用户:我买的 NF0A7RKA 雪地手套有质量问题,要退货
+AI:  好的,我帮您处理。请问您的订单号是?
+用户:订单 #20260615-A
+AI:  您的订单金额是 ¥789,我们支持 7 天无理由退货。
+     ↑ (AI 不知道是 15 天,而且没查真实订单就瞎编)
+
+用户:那这个手套材质是什么?
+AI:  雪地手套通常使用防水尼龙 + 抓绒内里。
+     ↑ (AI 在猜,不是查产品库)
+
+用户:寄回地址给我?
+AI:  退货地址:广州市天河区 XX 路 XX 号。
+     ↑ (AI 给了个假地址!客户真寄过去了,丢件!)
+
+用户:物流单号啥时候发?
+AI:  我们会在 24 小时内审核,通过后给您物流单号。
+     ↑ (答非所问,而且超时也不知道)
+
+[事故]:客户按假地址寄件 → 丢件 → 平台投诉 → 店群封号 7 天
+       ↑ 单 Agent 幻觉 + 角色混乱 + 没有 SOP</code></pre>
+
+<p><strong>✅ 多 Agent 分工</strong>(每 Agent 一个职责,通过 AgenticScope 协作):</p>
+
+<pre><code>用户:我买的 NF0A7RKA 雪地手套有质量问题,要退货
+
+[Sequential Workflow 启动]
+  ① OrderAgent        → 查订单 #20260615-A (2026-06-15 下单, 6 天)
+                        → 写入 scope: orderAmount=¥789, daysSinceOrder=6
+  ② PolicyAgent       → 查退换政策(读 scope: 6 天 &lt; 15 天,可退)
+                        → 写入 scope: canReturn=true, returnDays=15
+  ③ ProductAgent      → 查商品库(scope: orderId → 真实材质/退货地址)
+                        → 写入 scope: material="防水尼龙+抓绒",
+                                    returnAddress="广州市番禺区 XX 路 XX 号"
+  ④ LogisticsAgent    → 物流(scope: 已审批 → 生成真实退货单号)
+                        → 写入 scope: trackingNo="YT202606201234"
+
+[Conditional 路由] 政策问题 → PolicyAgent / 物流问题 → LogisticsAgent
+[Voting 多模型投票] 质量问题严重性 → 3 个 AI 共识 → 决定退款还是换货
+
+AI:  您的订单 #20260615-A 已查询:
+    - 购买日期 2026-06-15,根据 15 天无理由退货政策,
+      您在退货期内(剩余 9 天)。
+    - 商品材质:防水尼龙 + 抓绒内里。
+    - 退货地址:广州市番禺区 XX 路 XX 号(收件人:售后部)。
+    - 退货物流单号:YT202606201234(24 小时内揽件)。
+用户:麻烦了!
+AI:  不客气,如有质量问题需要协助评估,
+    我们的质检 Agent 会联系您确认。</code></pre>
+
+<p><strong>🔥 真实成本案例</strong>:跨境电商客服单 AI 命中率 60% / 答非所问率 18% / 客户投诉 8% → 平台罚款 ¥5 万/单。<strong>多 Agent 分工后命中率 88% / 答非所问 4% / 投诉 1%</strong>。<strong>月省 ¥18 万</strong>(罚款 + 客户挽回 + 培训人力)。</p>
+
+<h3>6 个 Agent 能解决的事</h3>
+<ul>
+  <li><strong>📦 跨境选品调研流水线</strong> — Sequential 4 步(选品 → 法规 → 物流 → 报告),每步一个 Agent,质量稳定</li>
+  <li><strong>✍️ 商品文案多版本生成</strong> — Parallel 3 Agent(高端 / 性价比 / 节日)同时出 3 版,A/B 测试</li>
+  <li><strong>📞 客服分诊路由</strong> — Conditional 按"法律 / 物流 / 商品"分流到对应专家,精准高效</li>
+  <li><strong>🏭 批量商品描述生成</strong> — Parallel Mapper 100 SKU 一次性生成,提速 50 倍</li>
+  <li><strong>🛡️ 多模型投票防幻觉</strong> — Voting 3 个 LLM 共识(高风险退款 / 法规判断),降低误判 80%</li>
+  <li><strong>👤 退款人工审核</strong> — HITL Agent 决策 → 主管审批,合规要求高金额退款必走人工</li>
+</ul>
+
+<blockquote class="mihuang">
+<strong>口诀</strong>:单 LLM 像<strong>独行侠</strong>(什么都能干,什么都干不好);多 Agent 像<strong>专业团队</strong>(每人专一,协同完成复杂任务)。企业级复杂任务<strong>必须 Agent 化</strong>。
+</blockquote>
+
+<h2>2. 核心架构</h2>
+
+<p>LangChain4j 的 <code>langchain4j-agentic</code> 模块提供<strong>8 大工作流模式</strong>(Anthropic 定义的两大类:Workflow + 纯 Agent):</p>
+
+<pre><code>【LangChain4j Agentic 系统架构】
+
+  ┌──────────────────────────────────────────────┐
+  │ 你的业务代码                                 │
+  │   novelCreator.invoke(inputMap)              │
+  └──────────────────┬───────────────────────────┘
+                     │
+                     ▼
+  ┌──────────────────────────────────────────────┐
+  │ AgenticServices(7 大 builder 入口)           │
+  │   agentBuilder / sequenceBuilder /          │
+  │   loopBuilder / parallelBuilder /           │
+  │   conditionalBuilder /                      │
+  │   supervisorBuilder / humanInTheLoopBuilder │
+  └──────────────────┬───────────────────────────┘
+                     │
+                     ▼
+  ┌──────────────────────────────────────────────┐
+  │ AgenticScope(共享数据黑板)                   │
+  │   Map&lt;String, Object&gt; readState / writeState│
+  │   跨 Agent 自动传递数据                       │
+  └──────────────────┬───────────────────────────┘
+                     │
+                     ▼
+  ┌──────────────────────────────────────────────┐
+  │ Sub-Agent 数组(每个是普通 AI Service)         │
+  │   Agent①  →  Agent②  →  Agent③             │
+  │   每个 Agent 有 @Agent + outputKey           │
+  └──────────────────────────────────────────────┘</code></pre>
+
+<h3>2.1 8 大工作流模式</h3>
+
+<table>
+<thead><tr><th>#</th><th>模式</th><th>builder</th><th>典型场景</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><strong>Sequential</strong></td><td><code>sequenceBuilder</code></td><td>流水线(选品 → 法规 → 报告)</td></tr>
+<tr><td>2</td><td><strong>Loop</strong></td><td><code>loopBuilder</code></td><td>迭代优化(打分 + 修改直到达标)</td></tr>
+<tr><td>3</td><td><strong>Parallel</strong></td><td><code>parallelBuilder</code></td><td>多版本同时生成(高端/性价比/节日)</td></tr>
+<tr><td>4</td><td><strong>Parallel Mapper</strong></td><td><code>parallelMapperBuilder</code></td><td>批量处理(100 SKU 一次)</td></tr>
+<tr><td>5</td><td><strong>Conditional</strong></td><td><code>conditionalBuilder</code></td><td>条件路由(法律/物流/商品分流)</td></tr>
+<tr><td>6</td><td><strong>Supervisor</strong></td><td><code>supervisorBuilder</code></td><td>监督决策(LLM 自动编排)</td></tr>
+<tr><td>7</td><td><strong>Blackboard</strong></td><td><code>blackboardBuilder</code></td><td>黑板协调(多 Agent 按数据激活)</td></tr>
+<tr><td>8</td><td><strong>HITL</strong></td><td><code>humanInTheLoopBuilder</code></td><td>人工介入(高风险必走主管)</td></tr>
+</tbody>
+</table>
+
+<h3>2.2 AgenticScope 共享机制</h3>
+
+<p><strong>AgenticScope</strong> = 多个 Agent 共享的"黑板"。每个 Agent 写自己的 <code>outputKey</code>,下一个 Agent 通过 <code>@V("key")</code> 读对应变量。<strong>不用手动传参,自动流转</strong>。</p>
+
+<pre><code>// 想象 AgenticScope 是团队白板:
+
+Agent① @Agent(outputKey="story") String generate()
+         → 写到白板: story = "龙与巫师的故事..."
+                        │
+                        ▼
+Agent② @Agent String edit(@V("story") String story)
+         → 读白板 story,改写 → 写到白板: story = "改写后..."
+                        │
+                        ▼
+Agent③ @Agent String score(@V("story") String story)
+         → 读白板 story,打分 → 写到白板: score = 0.85
+
+最终:输出 scope.readState("story")</code></pre>
+
+<h2>3. 基础 4 模式(必学)</h2>
+
+<h3>3.1 Sequential 顺序</h3>
+
+<p><strong>用途</strong>:流水线处理,A 输出传给 B,B 输出传给 C。</p>
+
+<pre><code>// 3 个 Agent 串行:创作 → 受众编辑 → 风格编辑
+CreativeWriter creativeWriter = AgenticServices.agentBuilder(CreativeWriter.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("story")
+    .build();
+
+AudienceEditor audienceEditor = AgenticServices.agentBuilder(AudienceEditor.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("story")
+    .build();
+
+StyleEditor styleEditor = AgenticServices.agentBuilder(StyleEditor.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("story")
+    .build();
+
+// Sequential 编排
+NovelCreator novelCreator = AgenticServices.sequenceBuilder(NovelCreator.class)
+    .subAgents(creativeWriter, audienceEditor, styleEditor)
+    .outputKey("story")
+    .build();
+
+String story = novelCreator.createNovel("dragons and wizards", "young adults", "fantasy");
+// 3 步顺序执行,每步把 outputKey="story" 写入 scope,下一步读取</code></pre>
+
+<h3>3.2 Loop 循环</h3>
+
+<p><strong>用途</strong>:迭代优化直到达标(打分 + 修改 + 再打分 + 再修改)。</p>
+
+<pre><code>// 评分 Agent(给故事打分)
+StyleScorer styleScorer = AgenticServices.agentBuilder(StyleScorer.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("score")  // 写到 scope: score = 0.85
+    .build();
+
+// Loop:评分 → 修改 → 评分 → 修改 ... 直到 score >= 0.8 或 5 次
+UntypedAgent styleReviewLoop = AgenticServices.loopBuilder()
+    .subAgents(styleScorer, styleEditor)
+    .maxIterations(5)
+    .exitCondition(scope -&gt; scope.readState("score", 0.0) &gt;= 0.8)
+    .build();
+
+// 组合:创作 → 评分-修改循环
+StyledWriter styledWriter = AgenticServices.sequenceBuilder(StyledWriter.class)
+    .subAgents(creativeWriter, styleReviewLoop)
+    .outputKey("story")
+    .build();</code></pre>
+
+<blockquote class="mihuang">
+<strong>💡 退出条件</strong>:<code>exitCondition(Predicate&lt;AgenticScope&gt;)</code> 默认每次 invoke 都判断一次。<code>testExitAtLoopEnd(true)</code> 强制每轮跑完再判断。<code>exitCondition(BiPredicate&lt;AgenticScope, Integer&gt;)</code> 还能拿到 loop 计数器。
+</blockquote>
+
+<h3>3.3 Parallel 并行</h3>
+
+<p><strong>用途</strong>:多个独立 Agent 同时跑,合并结果。</p>
+
+<pre><code>// 美食专家 + 电影专家同时跑
+FoodExpert foodExpert = AgenticServices.agentBuilder(FoodExpert.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("meals")
+    .build();
+
+MovieExpert movieExpert = AgenticServices.agentBuilder(MovieExpert.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("movies")
+    .build();
+
+// Parallel:两者并发,output 函数合并结果
+EveningPlannerAgent planner = AgenticServices.parallelBuilder(EveningPlannerAgent.class)
+    .subAgents(foodExpert, movieExpert)
+    .executor(Executors.newFixedThreadPool(2))  // 自定义线程池
+    .outputKey("plans")
+    .output(scope -&gt; {
+        List&lt;String&gt; movies = scope.readState("movies", List.of());
+        List&lt;String&gt; meals = scope.readState("meals", List.of());
+        // 合并:1 电影 + 1 餐
+        List&lt;EveningPlan&gt; plans = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; Math.min(movies.size(), meals.size()); i++) {
+            plans.add(new EveningPlan(movies.get(i), meals.get(i)));
+        }
+        return plans;
+    })
+    .build();
+
+List&lt;EveningPlan&gt; plans = planner.plan("romantic");</code></pre>
+
+<h3>3.4 Parallel Mapper 批处理</h3>
+
+<p><strong>用途</strong>:同一 Agent 在不同数据上并发(100 SKU 同时生成描述)。</p>
+
+<pre><code>// 给 1 个 Person 生成星座运势
+PersonAstrologyAgent astrologyAgent = AgenticServices.agentBuilder(PersonAstrologyAgent.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("horoscope")
+    .build();
+
+// Mapper:批量处理 100 个人,每个独立并发
+BatchHoroscopeAgent batchAgent = AgenticServices.parallelMapperBuilder(BatchHoroscopeAgent.class)
+    .subAgents(astrologyAgent)
+    .itemsProvider("persons")   // 从 scope 读 persons 集合
+    .executor(Executors.newFixedThreadPool(3))
+    .build();
+
+List&lt;Person&gt; persons = List.of(
+    new Person("Mario", "aries"),
+    new Person("Luigi", "pisces"),
+    new Person("Peach", "leo")
+);
+List&lt;String&gt; horoscopes = batchAgent.generateHoroscopes(persons);
+// 3 个 Person 并发处理,结果自动汇总为 List&lt;String&gt;</code></pre>
+
+<blockquote class="mihuang">
+<strong>⚠️ Mapper 限制</strong>:子 Agent <strong>不能配 ChatMemory</strong>(每次独立调用,记忆会冲突)。需要持久化对话用 Sequential。
+</blockquote>
+
+<h2>4. 进阶 4 模式</h2>
+
+<h3>4.1 Conditional 条件路由</h3>
+
+<p><strong>用途</strong>:先分类,再按类别路由到对应专家。</p>
+
+<pre><code>// 路由器 Agent(分类用户请求)
+CategoryRouter router = AgenticServices.agentBuilder(CategoryRouter.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("category")  // LEGAL / MEDICAL / TECHNICAL / UNKNOWN
+    .build();
+
+MedicalExpert medicalExpert = AgenticServices.agentBuilder(MedicalExpert.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("response")
+    .build();
+
+LegalExpert legalExpert = AgenticServices.agentBuilder(LegalExpert.class)
+    .chatModel(BASE_MODEL)
+    .outputKey("response")
+    .build();
+
+// Conditional:按 category 路由到对应专家
+UntypedAgent expertsAgent = AgenticServices.conditionalBuilder()
+    .subAgents(scope -&gt; scope.readState("category", RequestCategory.UNKNOWN) == RequestCategory.MEDICAL,
+               medicalExpert)
+    .subAgents(scope -&gt; scope.readState("category", RequestCategory.UNKNOWN) == RequestCategory.LEGAL,
+               legalExpert)
+    .subAgents(scope -&gt; scope.readState("category", RequestCategory.UNKNOWN) == RequestCategory.TECHNICAL,
+               technicalExpert)
+    .build();
+
+// 组合:Router → Conditional
+ExpertRouterAgent expertRouter = AgenticServices.sequenceBuilder(ExpertRouterAgent.class)
+    .subAgents(router, expertsAgent)
+    .outputKey("response")
+    .build();
+
+String response = expertRouter.ask("I broke my leg, what should I do?");
+// → router: MEDICAL → medicalExpert 接管</code></pre>
+
+<h3>4.2 Supervisor 监督决策</h3>
+
+<p><strong>用途</strong>:让 LLM 自己决定调哪些子 Agent(动态决策)。</p>
+
+<pre><code>// 3 个银行 Agent
+WithdrawAgent withdraw = AgenticServices.agentBuilder(WithdrawAgent.class)
+    .chatModel(BASE_MODEL)
+    .build();
+CreditAgent credit = AgenticServices.agentBuilder(CreditAgent.class)
+    .chatModel(BASE_MODEL)
+    .build();
+ExchangeAgent exchange = AgenticServices.agentBuilder(ExchangeAgent.class)
+    .chatModel(BASE_MODEL)
+    .build();
+
+// Supervisor:LLM 自动决定调用顺序
+SupervisorAgent bankSupervisor = AgenticServices.supervisorBuilder()
+    .chatModel(PLANNER_MODEL)        // 可以用更强的模型做决策
+    .subAgents(withdraw, credit, exchange)
+    .responseStrategy(SupervisorResponseStrategy.SUMMARY)  // 返回摘要
+    .build();
+
+String result = bankSupervisor.invoke("Transfer 100 EUR from Mario's to Georgios' account");
+// Supervisor 内部生成:
+//   AgentInvocation{exchange, EUR→USD, amount=100}
+//   AgentInvocation{withdraw, user=Mario, amount=115}
+//   AgentInvocation{credit, user=Georgios, amount=115}
+//   AgentInvocation{done, response=...}</code></pre>
+
+<h3>4.3 Supervisor 三种 responseStrategy</h3>
+
+<table>
+<thead><tr><th>策略</th><th>返回内容</th><th>适用</th></tr></thead>
+<tbody>
+<tr><td><code>LAST</code>(默认)</td><td>最后一个 Agent 的输出</td><td>多数场景(用户只关心最终结果)</td></tr>
+<tr><td><code>SUMMARY</code></td><td>所有 Agent 操作摘要</td><td>多步操作(银行转账 / 退款流程)</td></tr>
+<tr><td><code>SCORED</code></td><td>额外用评分 Agent 选最合适的</td><td>质量优先(不确信哪个更好)</td></tr>
+</tbody>
+</table>
+
+<h3>4.4 Blackboard 黑板协调</h3>
+
+<p><strong>用途</strong>:多 Agent 根据<strong>数据状态</strong>自动激活(类似事件驱动)。</p>
+
+<pre><code>// 医疗诊断:症状提取 → 化验分析 → 药物冲突 → 诊断 → 人工审核
+MedicalDiagnostics diagnostics = AgenticServices.plannerBuilder(MedicalDiagnostics.class)
+    .subAgents(symptomExtractor, labAnalyzer, drugInteraction, diagnosisAgent, humanReview)
+    .planner(() -&gt; new BlackboardPlanner(
+        scope -&gt; scope.hasState("approvedDiagnosis"),  // 终止条件
+        agentOfType(DrugInteractionChecker.class,
+            scope -&gt; scope.readState("symptoms", "").toLowerCase().contains("medication"))
+        .or(declarationOrder())   // 其他 Agent 按声明顺序激活
+    ))
+    .outputKey("approvedDiagnosis")
+    .build();</code></pre>
+
+<blockquote class="mihuang">
+<strong>💡 Blackboard 适合</strong>:多 Agent 依赖关系复杂、激活条件动态(根据 scope 状态决定下一步)。医疗诊断 / 工业控制 / 多 Agent 协作推理。
+</blockquote>
+
+<h3>4.5 HITL 人工介入</h3>
+
+<p><strong>用途</strong>:关键决策让人类审批(高金额退款 / 法规风险 / 医疗诊断)。</p>
+
+<pre><code>// 人工审核 Agent:返回修改意见或不修改
+HumanInTheLoop humanReview = AgenticServices.humanInTheLoopBuilder()
+    .description("Review the diagnosis and approve or request additional analysis")
+    .outputKey("symptoms")           // 写入 scope: symptoms(可能被覆盖)
+    .inputKey(String.class, "diagnosis")  // 仅在 diagnosis 存在时激活
+    .responseProvider(scope -&gt; {
+        String diagnosis = scope.readState("diagnosis", "");
+        String symptoms = scope.readState("symptoms", "");
+
+        // 弹个对话框给主管审批(实际项目换成 JavaFX / Web)
+        boolean approved = showReviewDialogToHuman(diagnosis, symptoms);
+
+        if (!approved) {
+            return symptoms + ". Patient also reports blurred vision.";
+            // 主管驳回,补充症状,重新激活 DrugInteractionChecker
+        }
+        scope.writeState("approvedDiagnosis", diagnosis);
+        return symptoms;
+    })
+    .build();</code></pre>
+
+<h2>5. Voting 投票模式</h2>
+
+<p><strong>用途</strong>:3 个 Agent 同时答同一问题,投票降低单 Agent 偏见 / 幻觉。</p>
+
+<pre><code>// 3 个评分 Agent(用不同 prompt / 模型)
+QualityScorer gpt4 = AgenticServices.agentBuilder(QualityScorer.class)
+    .chatModel(OpenAiChatModel.builder().modelName("gpt-4o").build())
+    .outputKey("vote")
+    .build();
+
+QualityScorer claude = AgenticServices.agentBuilder(QualityScorer.class)
+    .chatModel(AnthropicChatModel.builder().modelName("claude-3-5-sonnet").build())
+    .outputKey("vote")
+    .build();
+
+QualityScorer qwen = AgenticServices.agentBuilder(QualityScorer.class)
+    .chatModel(QwenChatModel.builder().modelName("qwen-max").build())
+    .outputKey("vote")
+    .build();
+
+// Voting:3 个 Agent 并发,取多数票
+ContentModerator moderator = AgenticServices.votingBuilder(ContentModerator.class)
+    .subAgents(gpt4, claude, qwen)
+    .votingStrategy(VotingStrategy.majority())  // 多数票
+    .build();
+
+Verdict verdict = moderator.moderate(userContent);
+// 3 个模型同时判断,多数票(2/3 通过 = 通过)</code></pre>
+
+<h3>5.1 3 种 VotingStrategy</h3>
+
+<table>
+<thead><tr><th>策略</th><th>聚合方式</th><th>适用</th></tr></thead>
+<tbody>
+<tr><td><code>VotingStrategy.majority()</code></td><td>取出现最多的值</td><td>分类 / 标签枚举</td></tr>
+<tr><td><code>VotingStrategy.average()</code></td><td>数值平均</td><td>评分 / 置信度</td></tr>
+<tr><td><code>VotingStrategy.highest()</code></td><td>取最大值</td><td>风险评估 / 最乐观</td></tr>
+</tbody>
+</table>
+
+<blockquote class="mihuang">
+<strong>💡 自定义策略</strong>:<code>VotingStrategy</code> 是 functional interface,可以写 lambda:<br>
+<code>VotingStrategy custom = votes -&gt; /* 自定义加权 / 置信度过滤 / 法定人数 */</code>
+</blockquote>
+
+<h2>6. 异步 + 流式</h2>
+
+<h3>6.1 Async 异步</h3>
+
+<p><strong>用途</strong>:Agent 调用立即返回,不等结果(后续 Agent 需要时自动阻塞)。</p>
+
+<pre><code>// 把 Agent 标 async
+FoodExpert foodExpert = AgenticServices.agentBuilder(FoodExpert.class)
+    .chatModel(BASE_MODEL)
+    .async(true)               // 异步调用
+    .outputKey("meals")
+    .build();
+
+// 即使在 Sequential 里,async Agent 也会并发执行
+EveningPlannerAgent planner = AgenticServices.sequenceBuilder(EveningPlannerAgent.class)
+    .subAgents(foodExpert, movieExpert)  // 两个 async Agent 同时跑
+    .executor(Executors.newFixedThreadPool(2))
+    .build();</code></pre>
+
+<h3>6.2 Streaming 流式</h3>
+
+<pre><code>public interface StreamingCreativeWriter {
+    @UserMessage("Generate a story about {{topic}}")
+    @Agent("Generates a story")
+    TokenStream generateStory(@V("topic") String topic);
+}
+
+StreamingCreativeWriter writer = AgenticServices.agentBuilder(StreamingCreativeWriter.class)
+    .streamingChatModel(streamingBaseModel())   // 用 StreamingChatModel
+    .outputKey("story")
+    .build();
+
+TokenStream tokenStream = writer.generateStory("dragons and wizards");
+// 边生成边推送,适合长内容</code></pre>
+
+<blockquote class="mihuang">
+<strong>⚠️ 流式限制</strong>:Streaming Agent 在工作流里,<strong>只有最外层能流式</strong>(内部的 TokenStream 会被吞掉等待完整)。需要嵌套流式用 Supervisor + 多 Streaming Agent。
+</blockquote>
+
+<h2>7. 8 模式选型决策</h2>
+
+<p>业务场景 → 选哪种模式:</p>
+
+<table>
+<thead><tr><th>业务场景</th><th>推荐模式</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td>多步流水线(选品 → 法规 → 报告)</td><td><strong>Sequential</strong></td><td>严格顺序,每步依赖上一步</td></tr>
+<tr><td>迭代优化(文案打分 + 修改)</td><td><strong>Loop</strong></td><td>直到达标退出</td></tr>
+<tr><td>多版本同时生成</td><td><strong>Parallel</strong></td><td>独立任务,合并结果</td></tr>
+<tr><td>批量处理(100 SKU 一次性)</td><td><strong>Parallel Mapper</strong></td><td>同 Agent 在集合上 fan-out</td></tr>
+<tr><td>客服分诊(按类别路由)</td><td><strong>Conditional</strong></td><td>分类后选专家</td></tr>
+<tr><td>复杂决策(LLM 自己编排)</td><td><strong>Supervisor</strong></td><td>步骤不确定,LLM 动态决定</td></tr>
+<tr><td>事件驱动多 Agent 协作</td><td><strong>Blackboard</strong></td><td>按数据状态激活</td></tr>
+<tr><td>关键决策需人工</td><td><strong>HITL</strong></td><td>合规 / 高风险</td></tr>
+<tr><td>降低单模型偏见</td><td><strong>Voting</strong></td><td>多模型共识</td></tr>
+</tbody>
+</table>
+
+<p><strong>组合拳</strong>(实战经常多个模式嵌套):</p>
+<ul>
+  <li><strong>Sequential + Parallel</strong>:流水线每一步又并发出多版本(如选品 → 多平台描述生成)</li>
+  <li><strong>Sequential + Conditional</strong>:路由 + 流水线(如客服分流 → 后续流水线)</li>
+  <li><strong>Supervisor + Sequential</strong>:动态决策 + 固定步骤(如银行转账:supervisor 决定用哪些 Agent)</li>
+  <li><strong>Loop + Voting</strong>:多模型评分 → 修改循环(评分更稳)</li>
+</ul>
+
+<h2>8. AgenticScope 共享机制深挖</h2>
+
+<p>AgenticScope 是 Agent 间的"共享内存"。每个 Agent 通过 <code>outputKey</code> 写,通过 <code>@V("key")</code> 或 <code>readState("key")</code> 读。</p>
+
+<pre><code>// 写入:outputKey
+CreativeWriter writer = AgenticServices.agentBuilder(CreativeWriter.class)
+    .outputKey("story")       // 把返回值写到 scope["story"]
+    .build();
+
+// 读取:@V(在方法参数上)
+public interface StyleEditor {
+    String editStory(@V("story") String story);  // 从 scope 读 "story"
+}
+
+// 读取:动态(在 Conditional / Loop 里)
+.exitCondition(scope -&gt; scope.readState("score", 0.0) &gt;= 0.8)
+
+// UntypedAgent:不用写接口,直接用 Map
+UntypedAgent creator = AgenticServices.sequenceBuilder()
+    .subAgents(writer, editor)
+    .build();
+Map&lt;String, Object&gt; result = creator.invoke(Map.of(
+    "topic", "dragons",
+    "style", "fantasy"
+));
+// 输入 map 自动复制到 scope,输出从 scope 读</code></pre>
+
+<blockquote class="mihuang">
+<strong>💡 编译选项</strong>:Agent 方法参数名 <code>story</code> 必须运行时保留,需要编译加 <code>-parameters</code>(Maven 加 <code>&lt;parameters&gt;true&lt;/parameters&gt;</code>),否则 <code>@V</code> 必填。
+</blockquote>
+
+<h2>9. 10 避坑</h2>
+
+<h3>坑 1 ❌ 直接当 AI Service 写 Agent</h3>
+<p><strong>症状</strong>:<code>AiServices.builder(MyAgent.class).build()</code> 也能跑,但 AgenticScope 完全没生效,多 Agent 不串数据。<br>
+<strong>根因</strong>:Agent 必须用 <code>AgenticServices</code> 创建,不能用 <code>AiServices</code>。<br>
+<strong>修法</strong>:<code>AgenticServices.agentBuilder(MyAgent.class).outputKey("...").build()</code>。</p>
+
+<h3>坑 2 ❌ Loop 没设 maxIterations 死循环</h3>
+<p><strong>症状</strong>:Agent 一直循环不退出,烧光 token。<br>
+<strong>根因</strong>:Loop 默认 <code>maxIterations=10</code>,但 <code>exitCondition</code> 永远不满足就会跑满 10 次;如果忘了设 max,默认无限。<br>
+<strong>修法</strong>:<strong>必须同时设</strong> <code>maxIterations(N)</code> + <code>exitCondition(...)</code>。</p>
+
+<h3>坑 3 ❌ Supervisor 卡死在 done Agent</h3>
+<p><strong>症状</strong>:Supervisor 调了 3 次都生成"还没完成",循环往复。<br>
+<strong>根因</strong>:Supervisor 需要<strong>至少一个 Agent 调完能产 "done" 信号</strong>(返回 task complete),prompt 里没明示。<br>
+<strong>修法</strong>:Sub-Agent 的 @UserMessage 加 "If task is complete, return 'done'"。</p>
+
+<h3>坑 4 ❌ Parallel Mapper 子 Agent 配了 ChatMemory</h3>
+<p><strong>症状</strong>:<code>IllegalStateException: Memory cannot be used with parallel mapper</code><br>
+<strong>根因</strong>:Mapper 每个 item 一个独立 Agent,记忆会冲突。<br>
+<strong>修法</strong>:Parallel Mapper 的子 Agent <strong>不能配 ChatMemory</strong>。需要记忆用 Sequential。</p>
+
+<h3>坑 5 ❌ HITL responseProvider 阻塞线程</h3>
+<p><strong>症状</strong>:HITL 弹对话框卡死整个工作流。<br>
+<strong>根因</strong>:<code>responseProvider</code> 是同步阻塞的,人类不点确定就一直等。<br>
+<strong>修法</strong>:1)对话框必须 timeout(如 30 秒自动 reject);2)提供 reject 默认值;3)异步消息队列(钉钉 / 飞书 审批回调)。</p>
+
+<h3>坑 6 ❌ Async Agent 输出格式不一致</h3>
+<p><strong>症状</strong>:<code>foodExpert</code> 返回 List&lt;String&gt;,<code>movieExpert</code> 返回 String,聚合时报 ClassCastException。<br>
+<strong>根因</strong>:Parallel 聚合时类型必须对齐。<br>
+<strong>修法</strong>:同类型 Parallel 子 Agent 用同一 outputType,或在 <code>output(scope)</code> 函数里手动转换。</p>
+
+<h3>坑 7 ❌ Blackboard 激活条件太宽,死循环</h3>
+<p><strong>症状</strong>:Blackboard Planner 一直激活 DrugInteractionChecker,循环跑。<br>
+<strong>根因</strong>:<code>agentOfType</code> 的激活条件没限制,scope 每次更新都触发。<br>
+<strong>修法</strong>:激活条件要"仅当数据变化时",加 <code>scope.hasState("symptoms")</code> + <code>!scope.readState("symptoms", "").equals(lastSymptoms)</code>。</p>
+
+<h3>坑 8 ❌ Stream Agent 嵌套工作流失效</h3>
+<p><strong>症状</strong>:Sequential 里第一个 Agent 是 Streaming,TokenStream 在工作流里被吞掉,等所有 Agent 跑完才整体返回。<br>
+<strong>根因</strong>:LangChain4j 工作流默认等所有 Agent 完成才返回,流式只能在最外层生效。<br>
+<strong>修法</strong>:要么用最外层 Streaming Agent + 内部 Sequential 同步 Agent,要么 Supervisor 配多 Streaming。</p>
+
+<h3>坑 9 ❌ outputKey 冲突覆盖</h3>
+<p><strong>症状</strong>:两个 Agent 都写 <code>outputKey="response"</code>,后写的覆盖前写的。<br>
+<strong>根因</strong>:AgenticScope 是 Map,同名 key 直接覆盖。<br>
+<strong>修法</strong>:outputKey 命名要<strong>唯一</strong>(如 <code>"finalResponse"</code> / <code>"intermediateResponse"</code>)。</p>
+
+<h3>坑 10 ❌ 忽略模块 experimental 警告</h3>
+<p><strong>症状</strong>:升级 LangChain4j 1.x → 1.y 后,Agent 代码编译失败。<br>
+<strong>根因</strong>:<code>langchain4j-agentic</code> 模块<strong>还在实验阶段</strong>,API 可能大改。<br>
+<strong>修法</strong>:生产用前 pin 版本;每 3 个月看一次 release notes;准备 fallback(用 Sequential AI Services 手拼)。</p>
+
+<h2>10. API 速查表(24 个)</h2>
+
+<table>
+<thead><tr><th>层级</th><th>类-接口</th><th>包路径</th><th>一句话作用</th></tr></thead>
+<tbody>
+<tr><td>入口</td><td><code>AgenticServices</code></td><td><code>dev.langchain4j.agentic</code></td><td>7 大 builder 静态工厂</td></tr>
+<tr><td>入口</td><td><code>agentBuilder</code></td><td><code>AgenticServices</code></td><td>创建单个 Agent</td></tr>
+<tr><td>Workflow</td><td><code>sequenceBuilder</code></td><td><code>AgenticServices</code></td><td>顺序流水线</td></tr>
+<tr><td>Workflow</td><td><code>loopBuilder</code></td><td><code>AgenticServices</code></td><td>循环迭代</td></tr>
+<tr><td>Workflow</td><td><code>parallelBuilder</code></td><td><code>AgenticServices</code></td><td>并行合并</td></tr>
+<tr><td>Workflow</td><td><code>parallelMapperBuilder</code></td><td><code>AgenticServices</code></td><td>批量并发</td></tr>
+<tr><td>Workflow</td><td><code>conditionalBuilder</code></td><td><code>AgenticServices</code></td><td>条件路由</td></tr>
+<tr><td>Workflow</td><td><code>supervisorBuilder</code></td><td><code>AgenticServices</code></td><td>LLM 监督决策</td></tr>
+<tr><td>Workflow</td><td><code>plannerBuilder</code></td><td><code>AgenticServices</code></td><td>自定义 Planner(含 Blackboard)</td></tr>
+<tr><td>Workflow</td><td><code>humanInTheLoopBuilder</code></td><td><code>AgenticServices</code></td><td>人工介入</td></tr>
+<tr><td>注解</td><td><code>@Agent</code></td><td><code>dev.langchain4j.agentic</code></td><td>标记 Agent 方法</td></tr>
+<tr><td>注解</td><td><code>@V</code></td><td><code>dev.langchain4j.agentic</code></td><td>从 scope 读变量</td></tr>
+<tr><td>注解</td><td><code>@UserMessage</code></td><td><code>dev.langchain4j.service</code></td><td>用户 prompt 模板</td></tr>
+<tr><td>注解</td><td><code>@SystemMessage</code></td><td><code>dev.langchain4j.service</code></td><td>系统 prompt 模板</td></tr>
+<tr><td>数据</td><td><code>AgenticScope</code></td><td><code>dev.langchain4j.agentic.scope</code></td><td>共享数据黑板</td></tr>
+<tr><td>数据</td><td><code>UntypedAgent</code></td><td><code>dev.langchain4j.agentic</code></td><td>无类型 Agent(Map 输入输出)</td></tr>
+<tr><td>数据</td><td><code>outputKey</code></td><td><code>agentBuilder</code></td><td>把结果写入 scope 的 key</td></tr>
+<tr><td>数据</td><td><code>inputKey</code></td><td><code>agentBuilder</code></td><td>声明 Agent 依赖的 scope key</td></tr>
+<tr><td>集成</td><td><code>chatModel</code></td><td><code>agentBuilder</code></td><td>配 LLM</td></tr>
+<tr><td>集成</td><td><code>streamingChatModel</code></td><td><code>agentBuilder</code></td><td>配流式 LLM</td></tr>
+<tr><td>集成</td><td><code>executor</code></td><td><code>parallelBuilder</code></td><td>并行线程池</td></tr>
+<tr><td>集成</td><td><code>async(true)</code></td><td><code>agentBuilder</code></td><td>异步执行</td></tr>
+<tr><td>策略</td><td><code>SupervisorResponseStrategy</code></td><td><code>dev.langchain4j.agentic</code></td><td>Supervisor 返回策略</td></tr>
+<tr><td>策略</td><td><code>VotingStrategy</code></td><td><code>dev.langchain4j.agentic</code></td><td>投票聚合策略</td></tr>
+</tbody>
+</table>
+
+<h2>11. 本章小结 + 下一章</h2>
+
+<ul>
+  <li><strong>8 大模式</strong>:Sequential(流水线)/ Loop(迭代)/ Parallel(并行)/ Parallel Mapper(批量)/ Conditional(路由)/ Supervisor(决策)/ Blackboard(数据驱动)/ HITL(人工)</li>
+  <li><strong>核心抽象</strong>:<code>AgenticServices</code> 创建 + <code>AgenticScope</code> 共享 + <code>@Agent</code> 标记 + <code>@V</code> 读 + <code>outputKey</code> 写</li>
+  <li><strong>Voting</strong>:多模型共识降低幻觉,3 策略 majority / average / highest</li>
+  <li><strong>Async + Stream</strong>:<code>async(true)</code> 异步 + <code>streamingChatModel</code> 流式,内外层限制不同</li>
+  <li><strong>10 避坑</strong>:别用 AiServices / Loop 必设 max / Supervisor done 信号 / Mapper 禁用 Memory / HITL timeout / Async 类型对齐 / Blackboard 条件限制 / Stream 嵌套失效 / outputKey 唯一 / 实验模块慎用</li>
+  <li><strong>跨境电商专属</strong>:选品流水线 / 文案多版 / 客服分诊 / 批量描述 / 多模型防幻觉 / 退款审核 —— <strong>6 大场景全 Agent 化</strong></li>
+</ul>
+
+<blockquote class="mihuang">
+<strong>口诀</strong>:<strong>简单用 Sequential</strong>,<strong>不确定用 Supervisor</strong>,<strong>批量用 Parallel Mapper</strong>,<strong>关键决策加 HITL</strong>。<strong>别一上来 Supervisor</strong>(难调试),从 Sequential 起步。
+</blockquote>
+
+<p><strong>下一章预告</strong>:ch16 <strong>MCP(Model Context Protocol)</strong> —— Agent 怎么调用<strong>外部工具</strong>(数据库 / 浏览器 / Slack / GitHub)?传统做法是给每个工具写 @Tool(ch06)。MCP 是<strong>标准化协议</strong>:外部工具按 MCP 协议暴露,任何 Agent / 任何语言都能直接对接。AgenticSystems 里的子 Agent 也可以跑在 MCP 远程服务器上。<strong>Agent 章节的"工具补充篇"</strong>。</p>
+
+<hr>
+<p class="footer-src">📖 本章基于官方文档:<a href="file:///E:/hermes_chat/langchain4j-html/Agents%20and%20Agentic%20AI%20_LangChain4j.html">Agents and Agentic AI _ LangChain4j.html</a> 提炼 + 实战扩展 · 内容仅基于 LangChain4j 官方资料,不与其他框架混搭 · ⚠️ <code>langchain4j-agentic</code> 模块处于实验阶段,API 可能调整</p>
+
+</main>
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

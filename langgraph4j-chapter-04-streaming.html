@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lg04 · 流式传输 · LangGraph4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">04</span> 流式传输(Token 级别边生成边推)</h1>
+    <p class="hero-sub">AsyncGenerator 嵌入 + StreamingChatGenerator + SpringStreamingChatGenerator + SSE / WebSocket · 6 业务场景</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<strong>流式传输 = LLM Token 边生成边推给用户</strong>。LangGraph4j 基于 <a href="https://github.com/bsorrentino/java-async-generator">java-async-generator</a> 库,<strong>流式图输出(<code>.stream()</code>)+ 节点内子流(<code>AsyncGenerator</code> 嵌入)+ 2 套 LLM 流式生成器</strong>(LangChain4j / Spring AI)。</p>
+
+<p><strong>核心价值</strong>:用户体验从"等 5 秒看完整段"变成"打字机效果",首字 200ms 出;agent 多步循环时,用户看到每步进度,不焦虑。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"咱们的 AI 客服是'一次返回完整答案',用户等 5 秒看不到东西,以为卡了 → 刷新 → 重复请求。怎么办?"</p>
+
+<p><strong>解法</strong>:用 <strong>流式传输</strong> —— LLM 每个 Token 一出来就推给前端(SSE / WebSocket),用户 <strong>200ms 看到第一个字</strong>,边看边等。LangGraph4j 用 <code>StreamingChatGenerator</code> 把 LangChain4j / Spring AI 的 streaming model 适配成 <code>AsyncGenerator</code>,节点返回 generator 实现"子流"。</p>
+
+<h3>6 个流式传输能解决的事</h3>
+<ul>
+  <li><strong>⌨️ 打字机效果</strong> — 用户 200ms 看到首字,体验比"等 5 秒"高 10 倍</li>
+  <li><strong>🔄 Agent 多步进度</strong> — "思考中 → 调工具:查订单 → 调工具:查库存 → 整理答案",用户看到每步,不等焦虑</li>
+  <li><strong>🛑 早停 + 节省 Token</strong> — 用户看到一半觉得答案不对,点"停",后面 30% Token 不生成(只付生成部分的)</li>
+  <li><strong>📊 实时反馈埋点</strong> — 每 Token 推一次,前端埋点能算"实际展示率"(用户有没有真看到完)</li>
+  <li><strong>🧪 流式 debug</strong> — 复杂 agent 出问题,看"哪个 Token 错了 / 哪步错了",而不是看完整 500 字找</li>
+  <li><strong>🔌 多端适配</strong> — Web 用 SSE(单向,简单)/ App 用 WebSocket(双向)/ CLI 用 stdout 实时打印</li>
+</ul>
+
+<p><strong>💡 什么时候不需要</strong>:批量离线任务(发邮件 / 生成报表)/ 内部 ETL 流水线 / 用户场景是"点提交等结果"(不是"边看边等") —— 流式反而增加复杂度。流式是"用户实时交互 + 节省感知时间"的优化方案。</p>
+
+<blockquote class="mihuang">
+  <strong>口诀</strong>:<strong>流式 = LLM Token 边生成边推</strong>。3 步:<strong>1. 节点返回 <code>AsyncGenerator</code></strong>(不是 String)+ <strong>2. <code>StreamingChatGenerator</code> 适配</strong>(LangChain4j / Spring AI 各一套)+ <strong>3. 主图 <code>.stream()</code> 遍历</strong>。配合 lg03 并行 = 实时 + 高性能双 buff。
+</blockquote>
+
+<h2>2. 3 个核心概念</h2>
+
+<table>
+<thead><tr><th>概念</th><th>作用</th><th>关键点</th></tr></thead>
+<tbody>
+<tr><td><strong>AsyncGenerator</strong></td><td>java-async-generator 库,LangGraph4j 流式核心</td><td>类似 <code>CompletableFuture</code> + <code>Iterator</code> 组合</td></tr>
+<tr><td><strong>嵌入(Embedded)</strong></td><td>主迭代器<strong>暂停</strong>,嵌入子 <code>AsyncGenerator</code> 跑完再恢复</td><td>节点返回 generator,主图自动"子流"</td></tr>
+<tr><td><strong>流式生成器</strong></td><td>把 LLM streaming 适配成 <code>AsyncGenerator</code></td><td>LangChain4j 用 <code>StreamingChatGenerator</code>;Spring AI 用 <code>SpringStreamingChatGenerator</code></td></tr>
+</tbody>
+</table>
+
+<h2>3. .stream() 流式图输出(基础)</h2>
+
+<p>LangGraph4j 内置 <code>graph.stream()</code> 流式输出(对应 lg01 提过):</p>
+
+<pre><code>var generator = graph.stream(inputs, config);
+
+// AsyncGenerator 必须迭代才能触发
+for (var step : generator) {
+    System.out.println("执行: " + step);  // NodeOutput(nodeId, state)
+}
+
+// 拿最终结果
+var finalResult = GraphResult.from(generator);</code></pre>
+
+<p><strong>注意</strong>:<code>.stream()</code> 本身<strong>不是 Token 级</strong> —— 它返回每<strong>节点</strong>的执行结果。如果节点内是 LLM,LLM 是一次性返回的(没流式)。</p>
+
+<p><strong>真正 Token 级</strong>需要<strong>节点内子流</strong>(下面)。</p>
+
+<h2>4. AsyncGenerator 嵌入(子流核心)</h2>
+
+<p>LangGraph4j 的杀手锏 —— <strong>节点可以返回 <code>AsyncGenerator</code></strong>(不是 <code>Map</code>),主图的迭代器会<strong>暂停</strong>,先消费完子 generator,再恢复主迭代。</p>
+
+<pre><code>// 普通节点返回 Map
+AsyncNodeAction&lt;State&gt; normalNode = state -&gt; Map.of("key", "value");
+
+// 流式节点返回 AsyncGenerator(新!)
+AsyncNodeAction&lt;State&gt; streamingNode = state -&gt; {
+    // 返回 generator(不是 Map)—— 主图会自动"嵌入"
+    return someAsyncGenerator;
+};</code></pre>
+
+<p><strong>3 步行为</strong>:</p>
+<ol>
+  <li>主图跑到 <code>streamingNode</code>,看到返回是 <code>AsyncGenerator</code>(不是 <code>Map</code>)</li>
+  <li><strong>主图迭代器暂停</strong>,先消费 <code>someAsyncGenerator</code> 全部元素</li>
+  <li>子 generator 跑完,主图<strong>继续</strong>下一节点</li>
+</ol>
+
+<p><strong>好处</strong>:用户感知不到"嵌套",从 <code>graph.stream()</code> 看是<strong>扁平</strong>的事件流。</p>
+
+<h2>5. LangChain4j 流式(node-by-node → Token 级)</h2>
+
+<h3>5.1 LangChain4j 原生 streaming</h3>
+
+<pre><code>// LangChain4j streaming model
+StreamingChatLanguageModel model = OpenAiStreamingChatModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .modelName("gpt-4o-mini")
+    .build();
+
+// onNext 每个 Token 触发
+model.generate("Tell me a joke", new StreamingResponseHandler&lt;AiMessage&gt;() {
+    public void onNext(String token) {  // ← 每个 token 一次
+        System.out.print(token);
+    }
+    public void onComplete(Response&lt;AiMessage&gt; response) { /* ... */ }
+    public void onError(Throwable error) { /* ... */ }
+});</code></pre>
+
+<h3>5.2 StreamingChatGenerator(适配器)</h3>
+
+<p>LangGraph4j 提供 <code>StreamingChatGenerator</code> 把 <code>StreamingResponseHandler</code> 转换 <code>AsyncGenerator</code>:</p>
+
+<pre><code>var generator = StreamingChatGenerator.builder()
+    .mapResult(r -&gt; Map.of("content", r.content()))   // 把完成结果转 Map(给 State)
+    .build();
+
+model.generate("Tell me a joke", generator.handler());  // ← 用 generator 的 handler
+
+for (var step : generator) {              // ← 遍历 generator(每个 Token 一次)
+    log.info("{}", step);
+}
+
+log.info("RESULT: {}", GraphResult.from(generator));</code></pre>
+
+<p><strong>关键 3 参数</strong>:</p>
+<ul>
+  <li><code>mapResult</code>:<strong>必填</strong>,<code>Function&lt;Response&lt;AiMessage&gt;, Map&lt;String,Object&gt;&gt;</code>,流<strong>完成时</strong>调,把 <code>Response</code> 转 <code>Map</code>(LangGraph4j 期望的 State 更新格式)</li>
+  <li><code>startingNode</code>(可选):流开始的节点 ID</li>
+  <li><code>startingState</code>(可选):流开始的 State</li>
+</ul>
+
+<h3>5.3 节点里返回 generator(完整示例)</h3>
+
+<pre><code>Map&lt;String, Object&gt; callAgent(State state) {
+    // 1. mapResult:把 Response 转 Map
+    final Function&lt;Response&lt;AiMessage&gt;, Map&lt;String, Object&gt;&gt; mapResult = response -&gt; {
+        if (response.finishReason() == FinishReason.TOOL_EXECUTION) {
+            // LLM 决定调工具
+            var toolReqs = response.content().toolExecutionRequests();
+            var action = new AgentAction(toolReqs.get(0), "");
+            return Map.of("agent_outcome", new AgentOutcome(action, null));
+        } else {
+            // LLM 给出最终答案
+            var result = response.content().text();
+            var finish = new AgentFinish(Map.of("returnValues", result), result);
+            return Map.of("agent_outcome", new AgentOutcome(null, finish));
+        }
+    };
+
+    // 2. 建 generator
+    var generator = StreamingChatGenerator.&lt;AiMessage, State&gt;builder()
+        .mapResult(mapResult)
+        .startingNode("agent")
+        .startingState(state)
+        .build();
+
+    // 3. 用 streaming 调 LLM(异步,不等)
+    streamingChatLanguageModel.generate(messages, tools, generator.handler());
+
+    // 4. ⚠️ 关键:节点返回 generator(不是 Map)
+    return Map.of("agent_outcome", generator);
+}</code></pre>
+
+<p><strong>行为</strong>:</p>
+<ul>
+  <li><code>streamingChatLanguageModel.generate(...)</code> 异步开始(不阻塞)</li>
+  <li>节点<strong>立刻返回</strong> <code>Map.of("agent_outcome", generator)</code></li>
+  <li>主图<strong>看到 generator 嵌入</strong>,暂停主迭代,先消费 generator</li>
+  <li>每个 Token 一出来,generator emit 一次,主图 forward 一次 → 前端拿到每个 Token</li>
+  <li>LLM 完成(返回 <code>Response</code>),<code>mapResult</code> 转 <code>Map</code>,generator 完成</li>
+  <li>主图恢复,继续下一节点</li>
+</ul>
+
+<h2>6. Spring AI 流式</h2>
+
+<p>Spring AI 的 streaming 返回 <code>Flux&lt;ChatResponse&gt;</code>(Reactive),需要 <code>SpringStreamingChatGenerator</code> 适配:</p>
+
+<h3>6.1 Spring AI 原生 streaming</h3>
+
+<pre><code>var chatClient = ChatClient.builder(chatModel)
+    .defaultSystem("You are a helpful AI Assistant answering questions.")
+    .build();
+
+Flux&lt;ChatResponse&gt; flux = chatClient.prompt()
+    .messages(new UserMessage("tell me a joke"))
+    .stream()
+    .chatResponse();</code></pre>
+
+<h3>6.2 SpringStreamingChatGenerator</h3>
+
+<pre><code>// 适配 Flux → AsyncGenerator
+var generator = SpringStreamingChatGenerator.builder()
+    .startingNode("agent")
+    .mapResult(response -&gt; Map.of(
+        "messages", response.getResult().getOutput()
+    ))
+    .build(flux);   // ← 喂 Flux
+
+for (var step : generator) {
+    log.info("{}", step);
+}</code></pre>
+
+<h3>6.3 节点里用 Spring AI + SpringStreamingChatGenerator</h3>
+
+<pre><code>Map&lt;String, Object&gt; callAgent(State state) {
+    // 1. Spring AI 调 streaming
+    Flux&lt;ChatResponse&gt; flux = chatClient.prompt()
+        .messages(state.messages())
+        .stream()
+        .chatResponse();
+
+    // 2. 适配成 AsyncGenerator
+    var generator = SpringStreamingChatGenerator.&lt;State&gt;builder()
+        .startingNode("agent")
+        .startingState(state)
+        .mapResult(response -&gt; Map.of(
+            "messages", response.getResult().getOutput()
+        ))
+        .build(flux);
+
+    // 3. 返回 generator
+    return Map.of("messages", generator);
+}</code></pre>
+
+<p><strong>同 LangChain4j 模式</strong>:节点返回 generator,主图嵌入消费。</p>
+
+<h2>7. 3 种 streaming 对比</h2>
+
+<table>
+<thead><tr><th>维度</th><th>LangChain4j</th><th>Spring AI</th><th>原生 LLM SDK</th></tr></thead>
+<tbody>
+<tr><td><strong>流式类型</strong></td><td><code>StreamingResponseHandler</code>(回调)</td><td><code>Flux&lt;ChatResponse&gt;</code>(Reactive)</td><td>各家不同(回调/Stream/SSE)</td></tr>
+<tr><td><strong>适配器</strong></td><td><code>StreamingChatGenerator</code></td><td><code>SpringStreamingChatGenerator</code></td><td>自己写</td></tr>
+<tr><td><strong>返回类型</strong></td><td><code>AsyncGenerator</code></td><td><code>AsyncGenerator</code></td><td>—</td></tr>
+<tr><td><strong>节点返回</strong></td><td><code>Map.of("k", generator)</code></td><td>同左</td><td>—</td></tr>
+<tr><td><strong>配合 LangGraph4j</strong></td><td>✅ 一等公民</td><td>✅ 一等公民</td><td>需要手动 wrap</td></tr>
+<tr><td><strong>生态</strong></td><td>langchain4j 全家桶</td><td>Spring 全家桶</td><td>—</td></tr>
+</tbody>
+</table>
+
+<h2>8. 实战:流式 AI 客服(多 Agent)</h2>
+
+<p>用户问 → 路由 → 选 Agent → 流式输出:</p>
+
+<pre><code>// === 1. 路由节点(不流式) ===
+AsyncNodeAction&lt;State&gt; router = state -&gt; {
+    String userMsg = (String) state.value("userMessage").orElse("");
+    // 简单分类(实际可用 LLM 分类)
+    if (userMsg.contains("订单") || userMsg.contains("order")) {
+        return Map.of("nextAgent", "order");
+    } else if (userMsg.contains("物流") || userMsg.contains("shipping")) {
+        return Map.of("nextAgent", "shipping");
+    } else {
+        return Map.of("nextAgent", "general");
+    }
+};
+
+// === 2. 订单 Agent(流式) ===
+AsyncNodeAction&lt;State&gt; orderAgent = state -&gt; {
+    String userMsg = (String) state.value("userMessage").orElse("");
+
+    // LangChain4j streaming
+    var generator = StreamingChatGenerator.&lt;AiMessage, State&gt;builder()
+        .mapResult(resp -&gt; Map.of(
+            "messages", resp.content().text(),       // 累积到 messages
+            "agentOutcome", "finished"
+        ))
+        .startingNode("order_agent")
+        .startingState(state)
+        .build();
+
+    streamingChatModel.generate(
+        List.of(UserMessage.from(userMsg)),
+        generator.handler()
+    );
+
+    return Map.of("__stream__", generator);   // 标记为流式
+};
+
+// === 3. 物流 Agent / 通用 Agent 类似(略) ===
+
+// === 4. 主图 ===
+var customerService = new StateGraph&lt;&gt;(State.SCHEMA, State::new)
+    .addNode("router", router)
+    .addNode("order_agent", orderAgent)
+    .addNode("shipping_agent", shippingAgent)  // 类似 orderAgent
+    .addNode("general_agent", generalAgent)    // 类似 orderAgent
+    .addNode("format_reply", state -&gt;
+        Map.of("reply", formatAsString(state.value("messages").orElse(List.of()))))
+
+    .addEdge(START, "router")
+    .addConditionalEdges("router",
+        edge_async(state -&gt; (String) state.value("nextAgent").orElse("general")),
+        EdgeMappings.builder()
+            .to("order_agent", "order")
+            .to("shipping_agent", "shipping")
+            .to("general_agent", "general")
+            .build())
+    .addEdge("order_agent",    "format_reply")
+    .addEdge("shipping_agent", "format_reply")
+    .addEdge("general_agent",  "format_reply")
+    .addEdge("format_reply", END)
+    .compile();
+
+// === 5. SSE 推给前端 ===
+@GetMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public Flux&lt;String&gt; chat(@RequestParam String message) {
+    var generator = customerService.stream(
+        Map.of("userMessage", message),
+        RunnableConfig.builder().threadId("user-1").build()
+    );
+
+    // AsyncGenerator → Flux&lt;ServerSentEvent&gt;
+    return Flux.create(sink -&gt; {
+        generator.forEachAsync(step -&gt; {
+            // 每个 step 推一次
+            sink.next(ServerSentEvent.builder()
+                .event("step")
+                .data(step.toString())
+                .build());
+        }).thenRun(sink::complete)
+          .exceptionally(sink::error);
+    });
+}</code></pre>
+
+<p><strong>前端</strong>:</p>
+
+<pre><code>// JavaScript:EventSource
+const es = new EventSource('/chat/stream?message=查订单');
+es.addEventListener('step', e => {
+    console.log('Token 来了:', e.data);
+    // 追加到页面
+});
+es.addEventListener('done', e => es.close());</code></pre>
+
+<p><strong>用户体验</strong>:</p>
+<ul>
+  <li>t=0:用户发"查订单 ORD-001"</li>
+  <li>t=200ms:前端看到"正在调订单接口..."</li>
+  <li>t=400ms:前端看到"正在查物流..."</li>
+  <li>t=500ms-3s:LLM 边生成边推,前端<strong>逐字显示</strong>"您的订单 ORD-001 状态:已发货,顺丰单号 SF12345..."</li>
+  <li>t=3s:流完成,前端关闭 EventSource</li>
+</ul>
+
+<h2>9. 配合 lg03 并行(高级模式)</h2>
+
+<p><strong>并行 + 流式 = 实时 + 高性能双 buff</strong>:</p>
+
+<pre><code>// 3 个 Agent 并行跑(各流式)
+var concurrentStreaming = new StateGraph&lt;&gt;(State.SCHEMA, State::new)
+    .addNode("dispatch", state -&gt; Map.of("prompt", state.value("question").orElse("")))
+    .addNode("agent1", state -&gt; {
+        var g = makeStreamingAgent("agent1", state);  // 各自流式
+        return Map.of("__stream_1__", g);
+    })
+    .addNode("agent2", state -&gt; {
+        var g = makeStreamingAgent("agent2", state);
+        return Map.of("__stream_2__", g);
+    })
+    .addNode("agent3", state -&gt; {
+        var g = makeStreamingAgent("agent3", state);
+        return Map.of("__stream_3__", g);
+    })
+    .addNode("merge", state -&gt; {
+        // 3 路结果合并
+        return Map.of("final", mergeAll(state));
+    })
+    .addEdge(START, "dispatch")
+    .addEdge("dispatch", "agent1")
+    .addEdge("dispatch", "agent2")
+    .addEdge("dispatch", "agent3")
+    .addEdge("agent1", "merge")
+    .addEdge("agent2", "merge")
+    .addEdge("agent3", "merge")
+    .addEdge("merge", END)
+    .compile();
+
+// 跑
+concurrentStreaming.stream(
+    Map.of("question", "..."),
+    RunnableConfig.builder()
+        .addParallelNodeExecutor("dispatch", ForkJoinPool.commonPool())  // 并行
+        .build()
+);
+// 前端同时收到 3 路 Token(混合显示 / 分别显示各路)</code></pre>
+
+<p><strong>注意</strong>:并行流式时,3 路 Token 顺序不确定(谁先 emit 谁先到)。前端要能<strong>区分各路</strong>(用 key prefix / ID)。</p>
+
+<h2>10. 决策树(用流式吗?)</h2>
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" style="max-width:100%;height:auto;background:#0f172a;border-radius:12px;padding:20px;">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+  </defs>
+
+  <text x="450" y="30" text-anchor="middle" fill="#f1f5f9" font-size="20" font-weight="bold">
+    流式传输选型
+  </text>
+
+  <rect x="350" y="60" width="200" height="50" rx="8" fill="url(#g1)"/>
+  <text x="450" y="92" text-anchor="middle" fill="white" font-size="14" font-weight="bold">用户场景?</text>
+
+  <line x1="450" y1="110" x2="450" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="200" y1="140" x2="700" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="150" y1="140" x2="150" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="140" x2="450" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="140" x2="750" y2="170" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="30" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <text x="150" y="195" text-anchor="middle" fill="#10b981" font-size="13" font-weight="bold">批量 / 离线</text>
+  <text x="150" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">用 execute() 一次拿</text>
+
+  <rect x="330" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#06b6d4" stroke-width="2"/>
+  <text x="450" y="195" text-anchor="middle" fill="#06b6d4" font-size="13" font-weight="bold">实时 UI / 用户交互</text>
+  <text x="450" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">流式(SSE/WebSocket)</text>
+
+  <rect x="630" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#a855f7" stroke-width="2"/>
+  <text x="750" y="195" text-anchor="middle" fill="#a855f7" font-size="13" font-weight="bold">Agent 多步 + 早停</text>
+  <text x="750" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">流式 + 进度</text>
+
+  <line x1="150" y1="230" x2="150" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="230" x2="450" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="230" x2="750" y2="260" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="30" y="260" width="240" height="80" rx="6" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="150" y="285" text-anchor="middle" fill="#10b981" font-size="12" font-weight="bold">零成本</text>
+  <text x="150" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">graph.execute()</text>
+  <text x="150" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">返回终态</text>
+  <text x="150" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">简单同步</text>
+
+  <rect x="330" y="260" width="240" height="80" rx="6" fill="#0f172a" stroke="#06b6d4" stroke-width="1"/>
+  <text x="330" y="285" text-anchor="middle" fill="#06b6d4" font-size="12" font-weight="bold">中成本</text>
+  <text x="330" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">+ StreamingChatGenerator</text>
+  <text x="330" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">+ 节点返回 generator</text>
+  <text x="330" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">+ SSE / WebSocket</text>
+
+  <rect x="630" y="260" width="240" height="80" rx="6" fill="#0f172a" stroke="#a855f7" stroke-width="1"/>
+  <text x="750" y="285" text-anchor="middle" fill="#a855f7" font-size="12" font-weight="bold">高灵活</text>
+  <text x="750" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">流式 + 并行(lg03)</text>
+  <text x="750" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">+ Agent 多步</text>
+  <text x="750" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">+ 早停 / 进度</text>
+
+  <rect x="50" y="370" width="800" height="150" rx="8" fill="url(#g2)"/>
+  <text x="450" y="395" text-anchor="middle" fill="white" font-size="14" font-weight="bold">5 大流式核心收益</text>
+  <text x="450" y="418" text-anchor="middle" fill="white" font-size="12">⌨️ 打字机效果:200ms 首字,体验 × 10</text>
+  <text x="450" y="438" text-anchor="middle" fill="white" font-size="12">🔄 Agent 多步进度:"思考中 → 调工具 → 整理"</text>
+  <text x="450" y="458" text-anchor="middle" fill="white" font-size="12">🛑 早停省 Token:用户点停 → 后面 30% 不生成</text>
+  <text x="450" y="478" text-anchor="middle" fill="white" font-size="12">📊 实时埋点:每 Token 推一次,算"实际展示率"</text>
+  <text x="450" y="498" text-anchor="middle" fill="white" font-size="12">🔌 多端:SSE(Web) / WebSocket(App) / stdout(CLI)</text>
+</svg>
+
+<h2>11. 5 个避坑</h2>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 1:把 graph.stream() 当成 Token 级流</strong><br>
+<strong>症状</strong>:<code>graph.stream()</code> 出来 3 步(node by node),以为是 Token 级,实际只是节点级。<br>
+<strong>根因</strong>:<code>graph.stream()</code> 是<strong>节点级</strong>(每节点一个 step),不是 Token 级。<br>
+<strong>修法</strong>:Token 级 = 节点内<strong>返回 <code>AsyncGenerator</code></strong>(<code>StreamingChatGenerator</code> / <code>SpringStreamingChatGenerator</code>),主图<strong>嵌入</strong>消费。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 2:流式节点忘返回 generator,变一次性</strong><br>
+<strong>症状</strong>:调 streaming model,但节点返回 <code>Map.of("text", fullText)</code>(一次性),用户还是等 5 秒看完整段。<br>
+<strong>根因</strong>:节点<strong>必须返回 <code>Map.of("k", generator)</code></strong>(generator 作 value),主图才识别为"嵌入"。<br>
+<strong>修法</strong>:
+<ul>
+  <li>streaming model → async 调用(handler 不阻塞)</li>
+  <li>节点 return <code>Map.of("k", generator)</code> 而<strong>不是</strong> <code>Map.of("k", fullText)</code></li>
+  <li>mapResult 在流<strong>完成时</strong>才被调(把 Response 转 Map)</li>
+</ul>
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 3:并行流式 3 路 Token 顺序错乱</strong><br>
+<strong>症状</strong>:3 个 Agent 并行流式,前端收到 Token 顺序:A1_token, B1_token, A2_token, B2_token(交替),不是 A1→A2→A3 / B1→B2→B3 各路有序。<br>
+<strong>根因</strong>:并行执行,3 路<strong>谁先 emit 谁先到</strong>(调度不确定)。<br>
+<strong>修法</strong>:
+<ul>
+  <li><strong>前端</strong>:用 key prefix / ID 区分各路(<code>step.agentId</code>),自己排序</li>
+  <li><strong>后端</strong>:SSE event 加 <code>id</code> 字段(Agent ID)</li>
+  <li>或:<strong>非并行流式</strong>(代价是 wall-clock 长)</li>
+</ul>
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 4:流式 + 检查点回放,Token 重复 / 漏</strong><br>
+<strong>症状</strong>:用 <code>MemorySaver</code> 中断恢复,流式时已 emit 的 Token 和 resume 后的 Token 拼起来有重复 / 缺失。<br>
+<strong>根因</strong>:流是"中间状态",检查点存的是"完整状态" —— 中断前已 emit 的 Token 没持久化,resume 后重新 emit。<br>
+<strong>修法</strong>:
+<ul>
+  <li>流式<strong>不用</strong>检查点(检查点设计为"完整任务重跑",不适合"Token 级回放")</li>
+  <li>真要 resume,前端<strong>记录已收到的 Token</strong>,resume 后<strong>去重</strong>(用 Token index)</li>
+  <li>或:把流结果<strong>落库</strong>(检查点存"已 emit 列表"),resume 时跳过</li>
+</ul>
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 5:流式 SSE 没设超时,长 LLM 卡死</strong><br>
+<strong>症状</strong>:LLM 推理 60 秒才出第一个 Token,前端 SSE 默认 30 秒超时,断连后用户看不到结果。<br>
+<strong>根因</strong>:SSE / WebSocket 默认有<strong>代理超时</strong>(Nginx 60s / Tomcat 30s 等),长 LLM 可能超时。<br>
+<strong>修法</strong>:
+<pre><code>// 1. 服务端:先发心跳("ping")告诉代理"我没卡"
+@GetMapping(value = "/chat/stream", produces = TEXT_EVENT_STREAM_VALUE)
+public Flux&lt;String&gt; chat(...) {
+    return Flux.interval(Duration.ofSeconds(15))   // 15s 一次心跳
+        .map(t -&gt; ":\n\n")                          // SSE 注释行
+        .mergeWith(actualStream);
+}
+
+// 2. 反向代理:Nginx 加 proxy_read_timeout 600s 等
+// 3. 前端:EventSource 自带重连,断了自动重连
+// 4. 服务:把"已开始"先写 DB,断了前端刷新能拿到</code></pre>
+</div>
+
+<h2>12. 速查表</h2>
+
+<table>
+<thead><tr><th>项</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><strong>核心</strong></td><td>流式 = LLM Token 边生成边推</td></tr>
+<tr><td><strong>基础库</strong></td><td>java-async-generator(<code>AsyncGenerator</code>)</td></tr>
+<tr><td><strong>图级流</strong></td><td><code>graph.stream(inputs, config)</code> → 节点级</td></tr>
+<tr><td><strong>节点级流</strong></td><td>节点返回 <code>Map.of("k", generator)</code> → Token 级(嵌入)</td></tr>
+<tr><td><strong>LangChain4j 适配</strong></td><td><code>StreamingChatGenerator.builder().mapResult(...).build()</code></td></tr>
+<tr><td><strong>Spring AI 适配</strong></td><td><code>SpringStreamingChatGenerator.builder().mapResult(...).build(flux)</code></td></tr>
+<tr><td><strong>mapResult</strong></td><td><code>Function&lt;Response, Map&lt;String,Object&gt;&gt;</code>,流完成时调</td></tr>
+<tr><td><strong>startingNode</strong>(可选)</td><td>流开始的节点 ID</td></tr>
+<tr><td><strong>startingState</strong>(可选)</td><td>流开始的 State</td></tr>
+<tr><td><strong>主图嵌入</strong></td><td>AsyncGenerator 嵌入机制(主迭代暂停,先消费子 generator)</td></tr>
+<tr><td><strong>前端</strong></td><td>SSE(EventSource)/ WebSocket / 轮询</td></tr>
+<tr><td><strong>配合并行(lg03)</strong></td><td>并行 + 流式 = 实时 + 高性能(注意 Token 顺序)</td></tr>
+<tr><td><strong>配合检查点(lg07)</strong></td><td>⚠️ 不直接兼容(流是中间状态,检查点是完整状态)</td></tr>
+<tr><td><strong>超时注意</strong></td><td>长 LLM 推理需心跳(防代理超时)</td></tr>
+</tbody>
+</table>
+
+<h2>13. 本章小结</h2>
+
+<ul>
+  <li><strong>3 层概念</strong>:<code>AsyncGenerator</code> 库 + 节点返回 generator(嵌入)+ 2 套 LLM 适配器</li>
+  <li><strong>关键 3 步</strong>:节点用 streaming model → 节点返回 <code>Map.of("k", generator)</code> → 主图嵌入消费</li>
+  <li><strong>2 套适配器</strong>:LangChain4j(<code>StreamingChatGenerator</code>)/ Spring AI(<code>SpringStreamingChatGenerator</code>)</li>
+  <li><strong>mapResult 必填</strong>:把 <code>Response</code>/<code>ChatResponse</code> 转 <code>Map</code>(流完成时调)</li>
+  <li><strong>前端协议</strong>:SSE(单向,简单)/ WebSocket(双向,实时)/ stdout(CLI)</li>
+  <li><strong>6 大场景</strong>:打字机 / Agent 进度 / 早停 / 埋点 / debug / 多端</li>
+  <li><strong>配合 lg03 并行</strong>:并行 + 流式双 buff(注意 Token 顺序)</li>
+</ul>
+
+<blockquote class="mihuang">
+  <strong>一句话总结</strong>:LangGraph4j 流式 = <strong>"AsyncGenerator 嵌入 + 2 套 LLM 适配器"</strong>。<strong>节点返回 generator 而不是 String/Map</strong>,主图自动"子流"消费。下一章(lg05 钩子)在节点<strong>前后</strong>加拦截器(日志 / 监控 / 鉴权)。
+</blockquote>
+
+</main>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch14 · RAG 检索增强生成 · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">14</span>RAG 检索增强生成(给 LLM 接外挂大脑)</h1>
+    <p class="hero-sub">3 种 RAG 风格 · Embedding + 向量库 · 5 大 Advanced 组件 · 15+ 向量库选型</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<code>EmbeddingModel</code>(文本→向量)+ <code>EmbeddingStore</code>(向量库) + <code>ContentRetriever</code>(相似度检索) = <strong>给 LLM 接外挂大脑</strong>。Easy RAG 一行启动 / Naive RAG 5 件套手动拼 / Advanced RAG 5 大组件模块化。<strong>做企业知识库 / 跨境法规检索 / 客服 SOP 库,RAG 是 99% 的正解</strong>。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"我们客服 AI 把 2023 年的冬季爆款推荐给客户,客户来骂说这些 SKU 早下架了。能不能让 AI 知道我们的<strong>实时</strong>商品库?"</p>
+
+<p><strong>❌ 闭卷模式的死循环</strong>(LLM 只靠训练数据):</p>
+
+<pre><code>用户:推荐 3 款冬季保暖手套
+AI:  1. 北面防滑雪地手套(NF0A7RKA) - 经典款
+    2. 哥伦比亚男士抓绒手套 - 性价比之选
+    3. 巴塔哥尼亚 R1 户外手套 - 专业户外
+用户:第 1 款现在还有货吗?
+AI:  抱歉,我无法查询实时库存,我建议您直接访问官网
+    ↑ (LLM 装死,因为训练数据截止后它不知道)
+用户:多少钱?
+AI:  据我所知,北美官网通常售价 $49.99
+    ↑ (幻觉!实际 $39.99 已是历史价格)
+用户:跟第二款比呢?
+AI:  抱歉,我不清楚您指哪款...
+    ↑ (上下文丢光,典型闭卷)</code></pre>
+
+<p><strong>✅ 开卷模式(RAG 注入实时商品库)</strong>:</p>
+
+<pre><code>用户:推荐 3 款冬季保暖手套
+[系统静默]:从 EmbeddingStore 检索"保暖手套" top-3
+            ↓
+            [商品 1] 北面防滑雪地手套 / $39.99 / 库存 230 件 / SKU:NF0A7RKA-V2
+            [商品 2] 优衣库 HEATTECH 触屏手套 / ¥99 / 库存 1200 件
+            [商品 3] 骆驼户外抓绒手套 / ¥79 / 库存 580 件
+            ↓ 注入 prompt
+AI:  根据您的实时商品库,推荐 3 款:
+    1. 北面防滑雪地手套 - $39.99 - 库存 230 件
+    2. 优衣库 HEATTECH 触屏手套 - ¥99 - 库存 1200 件
+    3. 骆驼户外抓绒手套 - ¥79 - 库存 580 件
+用户:第 2 款评价怎么样?
+AI:  优衣库 HEATTECH 系列在客户群评价很高(评分 4.7/5),
+    主要优点是触屏兼容和轻薄保暖。
+    ↑ (RAG 检索到客户评价文档)
+用户:跟第 1 款比?
+AI:  相比第 1 款北面雪地手套($39.99,适合零下 20°C 户外),
+    第 2 款更适合日常通勤和轻度户外。
+    ↑ (RAG 跨文档对比也能答)</code></pre>
+
+<p><strong>🔥 真实成本案例</strong>:跨境电商客服 200 座席 × 8 小时 × 50 咨询/人/天 = <strong>8 万次咨询/天</strong>。AI 答不上的 30% 转人工,人工成本 ¥15/通 × 2.4 万通 = <strong>¥36 万/月</strong>。RAG 把 AI 命中率从 60% → 88%,转人工率 30% → 12%,<strong>月省 ¥26 万</strong>(人力 + 培训 + 流失)。</p>
+
+<h3>6 个 RAG 能解决的事</h3>
+<ul>
+  <li><strong>📚 企业知识库问答</strong> — 把公司 Wiki / 飞书文档 / Confluence / Notion 喂给 LLM,员工用自然语言查询</li>
+  <li><strong>📦 实时商品库推荐</strong> — LLM 推荐时强制参考最新 SKU / 价格 / 库存 / 评价,告别"AI 幻觉"</li>
+  <li><strong>📜 跨境法规检索</strong> — 把美国 FDA / 欧盟 CE / 日本 PSE 等认证要求喂给 LLM,出口合规审查自动化</li>
+  <li><strong>🏥 医疗问答助手</strong> — 把内部病例库 / 药品说明书 / 临床指南喂给 LLM,辅助医生快速查证</li>
+  <li><strong>📞 客服 SOP 检索</strong> — 把退换货流程 / 售后政策 / 物流异常处理 SOP 喂给 AI,客服回答标准化</li>
+  <li><strong>🛡️ 法务合同审查</strong> — 把过去 1000 份合同模板 + 法务批注喂给 LLM,辅助新合同风险扫描</li>
+</ul>
+
+<blockquote class="mihuang">
+<strong>口诀</strong>:LLM 像<strong>闭卷考生</strong>(只记训练数据),RAG 像<strong>开卷考生</strong>(可翻书)。99% 企业场景都要开卷 —— 没 RAG 的 LLM 在企业就是<strong>文职花瓶</strong>。
+</blockquote>
+
+<h2>2. 核心架构</h2>
+
+<p>RAG 在 LangChain4j 里分两阶段:<strong>索引(离线)</strong>和<strong>检索(在线)</strong>。</p>
+
+<pre><code>【索引阶段 · 离线,可定时 cron 跑】
+原始文档 ──→ DocumentLoader ──→ Document[] (带 metadata)
+                                          │
+                                          ▼
+                            DocumentSplitter(切 chunk)
+                                          │
+                                          ▼
+                              TextSegment[] (300 token/chunk)
+                                          │
+                                          ▼
+                            EmbeddingModel(文本→向量)
+                                          │
+                                          ▼
+                            EmbeddingStore. add(向量, segment)
+                                          │
+                                          ▼
+                            ┌──────────────────────────┐
+                            │ EmbeddingStore(向量数据库) │
+                            │  InMemory / PGVector /   │
+                            │  Qdrant / Pinecone / Milvus │
+                            └──────────────────────────┘
+
+【检索阶段 · 在线,每次用户问问题】
+用户 Query ──→ EmbeddingModel(向量化)
+                       │
+                       ▼
+              EmbeddingStore.search(相似度 top-K)
+                       │
+                       ▼
+              Content[] top-3~5(最相关的片段)
+                       │
+                       ▼
+              ContentInjector(注入到 UserMessage)
+                       │
+                       ▼
+              LLM(带着 context 回答)
+                       │
+                       ▼
+              返回给用户</code></pre>
+
+<h3>2.1 三种 RAG 风格总览</h3>
+
+<table>
+<thead><tr><th>风格</th><th>上手难度</th><th>代码量</th><th>可定制性</th><th>适用阶段</th></tr></thead>
+<tbody>
+<tr><td><strong>Easy RAG</strong></td><td>⭐ 一行启动</td><td>5-10 行</td><td>低(SPI 自动装载)</td><td>POC / 原型验证</td></tr>
+<tr><td><strong>Naive RAG</strong></td><td>⭐⭐ 手动拼</td><td>30-50 行</td><td>中(每件可换)</td><td>中小业务 / 单一知识库</td></tr>
+<tr><td><strong>Advanced RAG</strong></td><td>⭐⭐⭐ 模块化</td><td>80-150 行</td><td>高(5 大组件自由组合)</td><td>企业级 / 多源 / 多语言</td></tr>
+</tbody>
+</table>
+
+<h3>2.2 五个 Advanced RAG 核心组件</h3>
+
+<table>
+<thead><tr><th>组件</th><th>职责</th><th>默认实现</th></tr></thead>
+<tbody>
+<tr><td><code>QueryTransformer</code></td><td>把 1 个 Query 改成 N 个(压缩 / 扩展 / 重写)</td><td><code>DefaultQueryTransformer</code>(透传)</td></tr>
+<tr><td><code>QueryRouter</code></td><td>决定 Query 走哪个 ContentRetriever</td><td><code>DefaultQueryRouter</code>(单一路由)</td></tr>
+<tr><td><code>ContentRetriever</code></td><td>从某个数据源拉 Content(向量库 / Web / SQL)</td><td><code>EmbeddingStoreContentRetriever</code></td></tr>
+<tr><td><code>ContentAggregator</code></td><td>合并多路召回的 Content,排序 / 去重</td><td><code>DefaultContentAggregator</code>(按分数)</td></tr>
+<tr><td><code>ContentInjector</code></td><td>把 Content 注入 UserMessage(默认拼到前面)</td><td><code>DefaultContentInjector</code></td></tr>
+</tbody>
+</table>
+
+<blockquote class="mihuang">
+<strong>💡 入口</strong>:所有 5 大组件通过 <code>RetrievalAugmentor</code> 统一调度。LangChain4j 默认实现 <code>DefaultRetrievalAugmentor</code> 把 5 大组件按顺序串起来,99% 场景够用。
+</blockquote>
+
+<h2>3. Easy RAG(一键启动)</h2>
+
+<p><strong>Easy RAG</strong>是 LangChain4j 给的"零配置"模式:加一个 <code>langchain4j-easy-rag</code> 依赖,它通过 SPI 自动装载 DocumentParser (Apache Tika) + DocumentSplitter + EmbeddingModel(bge-small-en-v1.5,ONNX 离线运行)+ InMemoryEmbeddingStore。<strong>5 行代码就有一个 RAG</strong>。</p>
+
+<h3>3.1 加依赖</h3>
+
+<pre><code>&lt;dependency&gt;
+    &lt;groupId&gt;dev.langchain4j&lt;/groupId&gt;
+    &lt;artifactId&gt;langchain4j-easy-rag&lt;/artifactId&gt;
+    &lt;version&gt;1.11.8-beta19&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;!-- 它会传递依赖:
+     - langchain4j-core
+     - Apache Tika(自动解析 PDF/DOCX/HTML...)
+     - bge-small-en-v1.5 ONNX 模型(离线 embedding)
+     - langchain4j-document-parser-apache-tika
+     - InMemoryEmbeddingStore 默认实现 --&gt;</code></pre>
+
+<h3>3.2 5 行代码完整 RAG</h3>
+
+<pre><code>// 1. 加载文档(默认从 /home/langchain4j/documentation 读所有文件)
+List&lt;Document&gt; documents = FileSystemDocumentLoader
+    .loadDocuments("/path/to/your/docs");
+
+// 2. 创建内存向量库
+InMemoryEmbeddingStore&lt;TextSegment&gt; embeddingStore = new InMemoryEmbeddingStore&lt;&gt;();
+
+// 3. 一行 ingest(SPI 自动切分 + embed + 入库)
+EmbeddingStoreIngestor.ingest(documents, embeddingStore);
+
+// 4. 配 ChatModel
+ChatModel chatModel = OpenAiChatModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .build();
+
+// 5. 创建带 RAG 的 AI Service
+Assistant assistant = AiServices.builder(Assistant.class)
+    .chatModel(chatModel)
+    .contentRetriever(EmbeddingStoreContentRetriever.from(embeddingStore))
+    .build();
+
+String answer = assistant.chat("什么是 RAG?");
+// → 自动从 docs 检索 + 拼到 prompt + 调 LLM</code></pre>
+
+<p><strong>💡 底层 SPI 自动做了什么</strong>:</p>
+
+<ul>
+  <li><code>DocumentParser</code>:<code>ApacheTikaDocumentParser</code>(PDF/DOCX/HTML/MD 全自动)</li>
+  <li><code>DocumentSplitter</code>:<code>DocumentByParagraphSplitter</code>(每段 ≤ 300 token,30 token overlap)</li>
+  <li><code>EmbeddingModel</code>:<code>AllMiniLmL6V2QuantizedEmbeddingModel</code>(ONNX,24MB,CPU 跑,MTEB 榜优秀)</li>
+  <li><code>EmbeddingStore</code>:<code>InMemoryEmbeddingStore</code>(重启丢数据,只适合 POC)</li>
+</ul>
+
+<blockquote class="mihuang">
+<strong>⚠️ Easy RAG 的代价</strong>:默认配置适合英文(模型 bge-small-en)+ 内存存储(重启丢数据)+ 单一 chunking 策略(段落级)。生产环境要做企业级 RAG,必须升级到 <strong>Naive RAG 或 Advanced RAG</strong>。
+</blockquote>
+
+<h3>3.3 文件加载方式</h3>
+
+<pre><code>// 1. 普通加载(只读当前目录,不递归)
+List&lt;Document&gt; docs = FileSystemDocumentLoader.loadDocuments("/docs");
+
+// 2. 递归加载子目录
+List&lt;Document&gt; docs = FileSystemDocumentLoader.loadDocumentsRecursively("/docs");
+
+// 3. 通配符过滤(只读 PDF)
+PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:*.pdf");
+List&lt;Document&gt; docs = FileSystemDocumentLoader.loadDocuments("/docs", matcher);
+
+// 4. 递归 + 通配符(用 **)
+PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:**.pdf");
+List&lt;Document&gt; docs = FileSystemDocumentLoader
+    .loadDocumentsRecursively("/docs", matcher);
+
+// 5. 从 URL 加载(网页文档)
+Document doc = UrlDocumentLoader.load("https://example.com/article.html", new ApacheTikaDocumentParser());
+
+// 6. 从 Classpath 加载(Spring Boot resources)
+List&lt;Document&gt; docs = ClassPathDocumentLoader.loadDocuments("/knowledge", new ApacheTikaDocumentParser());</code></pre>
+
+<h2>4. Naive RAG(5 件套手动拼)</h2>
+
+<p><strong>Naive RAG</strong>就是<strong>不用 Easy RAG 的 SPI 自动装配</strong>,自己手动配 5 件套:<code>DocumentLoader</code> → <code>DocumentSplitter</code> → <code>EmbeddingModel</code> → <code>EmbeddingStore</code> → <code>ContentRetriever</code>。<strong>每个件可换,生产环境就靠这层</strong>。</p>
+
+<h3>4.1 完整代码:跨境电商 SKU 知识库</h3>
+
+<pre><code>// 1. DocumentLoader —— 加载本地 SKU 文档(可能还有商品图说明)
+List&lt;Document&gt; documents = FileSystemDocumentLoader
+    .loadDocumentsRecursively("/data/products/2026");
+
+// 2. DocumentSplitter —— 中文按段落切,500 token/chunk,100 token overlap
+DocumentSplitter splitter = DocumentByParagraphSplitter.builder()
+    .maxChunkSize(500)       // 中文 500 token ≈ 750 字
+    .chunkOverlap(100)       // 重叠 100 token 避免边界语义丢
+    .tokenizer(new HuggingFaceTokenizer("gpt2"))  // 用 GPT2 tokenizer 算 token
+    .build();
+
+// 3. EmbeddingModel —— 用 OpenAI text-embedding-3-small(中英都好,便宜)
+EmbeddingModel embeddingModel = OpenAiEmbeddingModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .modelName("text-embedding-3-small")  // 1536 维,$0.02/百万 token
+    .build();
+
+// 4. EmbeddingStore —— 用 PGVector(公司已有 PostgreSQL,无需额外组件)
+EmbeddingStore&lt;TextSegment&gt; embeddingStore = PGVectorEmbeddingStore.builder()
+    .host("localhost")
+    .port(5432)
+    .database("ecommerce")
+    .user("postgres")
+    .password("secret")
+    .table("product_embeddings")
+    .dimension(1536)  // 必须跟 embedding 模型维度匹配
+    .build();
+
+// 5. ContentRetriever —— 检索 top-5,最低相似度 0.7
+ContentRetriever contentRetriever = EmbeddingStoreContentRetriever.builder()
+    .embeddingStore(embeddingStore)
+    .embeddingModel(embeddingModel)
+    .maxResults(5)            // 取 top-5
+    .minScore(0.7)            // 相似度 < 0.7 不要
+    .filter(metadataKey("category").isEqualTo("electronics"))  // 元数据过滤
+    .build();
+
+// 6. AI Service 注入
+ChatModel chatModel = OpenAiChatModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .modelName("gpt-4o-mini")
+    .build();
+
+Assistant assistant = AiServices.builder(Assistant.class)
+    .chatModel(chatModel)
+    .contentRetriever(contentRetriever)
+    .chatMemory(MessageWindowChatMemory.withMaxMessages(10))
+    .build();
+
+String answer = assistant.chat("推荐一款夏季蓝牙耳机,预算 200 以内");</code></pre>
+
+<h3>4.2 自定义 Ingestor 流程</h3>
+
+<p>生产环境通常<strong>手动控制 ingest 流程</strong>(要加 metadata、要清洗、要 skip):</p>
+
+<pre><code>EmbeddingStoreIngestor ingestor = EmbeddingStoreIngestor.builder()
+    .documentSplitter(splitter)
+    .embeddingModel(embeddingModel)
+    .embeddingStore(embeddingStore)
+    .documentTransformer(new MetadataTransformer())  // 加元数据
+    .build();
+
+// 一次 ingest 全部
+ingestor.ingest(documents);
+
+// 手动逐个 ingest(适合大数据量,分批)
+for (Document doc : documents) {
+    Document enriched = doc.transform(document -&gt; {
+        document.metadata().put("source", "product_catalog");
+        document.metadata().put("indexed_at", Instant.now().toString());
+        return document;
+    });
+    ingestor.ingest(List.of(enriched));
+}</code></pre>
+
+<h3>4.3 检索参数调优</h3>
+
+<pre><code>EmbeddingStoreContentRetriever.builder()
+    .embeddingStore(embeddingStore)
+    .embeddingModel(embeddingModel)
+    // 召回数 vs 准确率权衡
+    .maxResults(3)       // 默认 5,过多会稀释 LLM 注意力
+    .minScore(0.7)       // 低于这个分数认为不相关,丢弃
+    // 元数据过滤:分类、日期、来源
+    .filter(metadataKey("category").isEqualTo("electronics"))
+    .filter(metadataKey("indexed_at").isGreaterThan("2026-01-01"))
+    // 动态 metadata 表达式(运行时从 user 查询拿)
+    .dynamicFilter(query -&gt; {
+        String userRole = query.metadata().chatMemoryId().toString();
+        return metadataKey("visibility").isEqualTo("public");
+    })
+    .build();</code></pre>
+
+<h2>5. Advanced RAG(模块化 5 组件)</h2>
+
+<p>Advanced RAG 把 5 大组件独立出来,通过 <code>RetrievalAugmentor</code> 串成 pipeline。每个组件<strong>可替换、可组合、可扩展</strong>。</p>
+
+<h3>5.1 RetrievalAugmentor 入口</h3>
+
+<pre><code>// 1. 创建 5 大组件
+QueryTransformer queryTransformer = new CompressingQueryTransformer(chatModel);
+ContentRetriever retriever1 = EmbeddingStoreContentRetriever.from(store1);  // 商品库
+ContentRetriever retriever2 = EmbeddingStoreContentRetriever.from(store2);  // 评价库
+QueryRouter queryRouter = new DefaultQueryRouter(retriever1, retriever2);  // 多路路由
+ContentAggregator aggregator = new DefaultContentAggregator();
+ContentInjector injector = new DefaultContentInjector();
+
+// 2. 拼成 RetrievalAugmentor
+RetrievalAugmentor augmentor = DefaultRetrievalAugmentor.builder()
+    .queryTransformer(queryTransformer)
+    .queryRouter(queryRouter)
+    .contentAggregator(aggregator)
+    .contentInjector(injector)
+    .build();
+
+// 3. 挂到 AI Service
+Assistant assistant = AiServices.builder(Assistant.class)
+    .chatModel(chatModel)
+    .retrievalAugmentor(augmentor)  // ← 跟 .contentRetriever() 二选一
+    .build();</code></pre>
+
+<h3>5.2 QueryTransformer(查询变换)</h3>
+
+<p>把 1 个用户问题改写成更适合检索的 N 个问题。</p>
+
+<pre><code>// 1. CompressingQueryTransformer —— 把"他住在哪" + 历史 → "John Doe 住在哪"
+QueryTransformer compressing = new CompressingQueryTransformer(chatModel);
+
+// 场景:用户追问
+// 用户: 介绍一下 John Doe
+// AI:    John Doe 是我们的 CTO...
+// 用户: 他住哪?     ← 本身检索不到"他"是谁
+// ↓ CompressingQueryTransformer 改写为:
+//      "John Doe 住在哪?"   ← 带历史合并,检索能命中
+
+// 2. ExpandingQueryTransformer —— 把 1 个问题改成 N 个变体
+QueryTransformer expanding = new ExpandingQueryTransformer(chatModel);
+// 用户: 蓝牙耳机
+// ↓ 改写为:
+//   1. "无线蓝牙耳机"
+//   2. "蓝牙 5.0 耳机"
+//   3. "运动蓝牙耳机"
+//   4. "降噪蓝牙耳机"
+//   → 每个 query 都去检索,合并去重,提升召回率
+
+// 3. Step-back prompting
+QueryTransformer stepBack = new StepBackQueryTransformer(chatModel);
+// 用户: gpt-4o-mini 价格?
+// ↓ 改写为:
+//   "OpenAI 各模型价格对比"   ← 先查通用,再聚焦
+
+// 4. HyDE(Hypothetical Document Embeddings)
+QueryTransformer hyde = new HyDEQueryTransformer(chatModel);
+// 用户: 怎么优化 PG 性能?
+// ↓ 让 LLM 生成"假想答案",用假想答案的向量去检索
+//   (原理:假想答案的向量比问题更接近真实文档)</code></pre>
+
+<h3>5.3 QueryRouter(多路路由)</h3>
+
+<p>把 1 个 Query 分发到<strong>不同数据源</strong>。</p>
+
+<pre><code>// 多路路由:商品库 + 评价库 + Web Search
+ContentRetriever productRetriever = EmbeddingStoreContentRetriever.from(productStore);
+ContentRetriever reviewRetriever = EmbeddingStoreContentRetriever.from(reviewStore);
+ContentRetriever webRetriever = WebSearchContentRetriever.from(
+    TavilyWebSearchEngine.builder()
+        .apiKey(System.getenv("TAVILY_API_KEY"))
+        .build()
+);
+
+// 默认路由:每个 retriever 都查一遍
+QueryRouter router = new DefaultQueryRouter(productRetriever, reviewRetriever, webRetriever);
+
+// LLM 路由:让 LLM 决定查哪个
+QueryRouter llmRouter = new LanguageModelQueryRouter(chatModel, productRetriever, reviewRetriever, webRetriever);
+
+// 自定义路由:按 metadata 路由
+QueryRouter customRouter = query -&gt; {
+    String category = query.metadata().invocationParameters().get("category");
+    if ("product".equals(category)) return List.of(productRetriever);
+    if ("review".equals(category)) return List.of(reviewRetriever);
+    return List.of(productRetriever, reviewRetriever);  // 默认全查
+};</code></pre>
+
+<h3>5.4 ContentAggregator(多路合并)</h3>
+
+<p>合并多路召回结果,排序、去重、过滤。</p>
+
+<pre><code>// 默认按相似度分数排序
+ContentAggregator aggregator = new DefaultContentAggregator();
+
+// 自定义:重排序(Re-rank)
+ContentAggregator rerankAggregator = new ReRankingContentAggregator(
+    new CohereReranker(System.getenv("COHERE_API_KEY")),  // 第三方重排序模型
+    // 或者本地 ONNX:new BgeRerankerModel()
+    3  // 保留 top-3
+);
+
+// 自定义:按 metadata 加权
+ContentAggregator weightedAggregator = (query, contents) -&gt; {
+    return contents.stream()
+        .sorted((a, b) -&gt; {
+            double scoreA = a.score() + scoreBoost(a.textSegment());
+            double scoreB = b.score() + scoreBoost(b.textSegment());
+            return Double.compare(scoreB, scoreA);
+        })
+        .limit(5)
+        .collect(Collectors.toList());
+};</code></pre>
+
+<h2>6. Embedding Model 选型速查</h2>
+
+<table>
+<thead><tr><th>模型</th><th>维度</th><th>价格</th><th>中英?</th><th>场景</th></tr></thead>
+<tbody>
+<tr><td><strong>bge-small-en-v1.5</strong>(ONNX,默认)</td><td>384</td><td>免费(本地)</td><td>仅英</td><td>POC / 英文 / 离线</td></tr>
+<tr><td><strong>bge-small-zh-v1.5</strong></td><td>512</td><td>免费(本地)</td><td>仅中</td><td>POC / 中文 / 离线</td></tr>
+<tr><td><strong>bge-large-en-v1.5</strong></td><td>1024</td><td>免费(本地)</td><td>英</td><td>高准确英文</td></tr>
+<tr><td><strong>text-embedding-3-small</strong>(OpenAI)</td><td>1536</td><td>$0.02/百万</td><td>中英都好</td><td>通用首选</td></tr>
+<tr><td><strong>text-embedding-3-large</strong>(OpenAI)</td><td>3072</td><td>$0.13/百万</td><td>中英都好</td><td>高准确首选</td></tr>
+<tr><td><strong>Cohere embed-multilingual-v3</strong></td><td>1024</td><td>$0.10/百万</td><td>100+ 语言</td><td>多语言场景</td></tr>
+<tr><td><strong>DashScope text-embedding-v3</strong>(通义)</td><td>1024</td><td>¥0.7/百万</td><td>中英</td><td>国内合规 / 中文优化</td></tr>
+<tr><td><strong>BgeM3</strong>(FlagEmbedding)</td><td>1024</td><td>免费(本地)</td><td>100+ 语言</td><td>多语言离线首选</td></tr>
+</tbody>
+</table>
+
+<p><strong>选型决策</strong>:</p>
+
+<ul>
+  <li><strong>纯英文 + POC</strong> → <code>bge-small-en-v1.5</code>(ONNX,免费)</li>
+  <li><strong>纯中文 + POC</strong> → <code>bge-small-zh-v1.5</code> 或 DashScope</li>
+  <li><strong>生产英文 / 中英</strong> → <code>text-embedding-3-small</code>(便宜 + 质量好)</li>
+  <li><strong>生产中文合规</strong> → <code>DashScope text-embedding-v3</code>(国内)</li>
+  <li><strong>多语言(跨境)</strong> → <code>Cohere embed-multilingual-v3</code> 或 <code>BgeM3</code></li>
+  <li><strong>高准确(法律 / 医疗)</strong> → <code>text-embedding-3-large</code> 或 <code>bge-large-en-v1.5</code></li>
+</ul>
+
+<blockquote class="mihuang">
+<strong>💡 维度必须匹配</strong>:EmbeddingModel 的 dimension 必须跟 EmbeddingStore 的 dimension 一致(改模型要重建库)。生产切模型时记得 <code>reindex()</code>。
+</blockquote>
+
+<h2>7. Embedding Store 选型速查(15+)</h2>
+
+<table>
+<thead><tr><th>向量库</th><th>类型</th><th>部署</th><th>百万向量性能</th><th>适用</th></tr></thead>
+<tbody>
+<tr><td><strong>InMemory</strong></td><td>内存</td><td>无</td><td>&lt; 10K(单 JVM)</td><td>POC / 测试</td></tr>
+<tr><td><strong>PGVector</strong></td><td>PG 扩展</td><td>已有 PG</td><td>500 万(中等)</td><td>中小公司 / 不想加组件</td></tr>
+<tr><td><strong>Qdrant</strong></td><td>独立服务</td><td>Docker</td><td>5000 万</td><td>推荐首选(开源 + Rust 性能)</td></tr>
+<tr><td><strong>Milvus</strong></td><td>独立服务</td><td>Docker / K8s</td><td>10 亿</td><td>大企业首选</td></tr>
+<tr><td><strong>Pinecone</strong></td><td>云服务</td><td>SaaS</td><td>无限制</td><td>不想运维 / 美国业务</td></tr>
+<tr><td><strong>Chroma</strong></td><td>独立服务</td><td>Docker</td><td>1000 万</td><td>轻量级 / Python 友好</td></tr>
+<tr><td><strong>Weaviate</strong></td><td>独立服务</td><td>Docker</td><td>数亿</td><td>混合搜索(全文 + 向量)</td></tr>
+<tr><td><strong>Redis</strong></td><td>已有 Redis</td><td>已有 Redis</td><td>百万级</td><td>已有 Redis / 小规模</td></tr>
+<tr><td><strong>MongoDB Atlas</strong></td><td>云 Mongo</td><td>SaaS</td><td>千万级</td><td>已有 MongoDB</td></tr>
+<tr><td><strong>Elasticsearch</strong></td><td>已有 ES</td><td>已有 ES</td><td>千万级</td><td>已有 ES / 全文 + 向量混合</td></tr>
+<tr><td><strong>Azure AI Search</strong></td><td>云服务</td><td>Azure</td><td>无限制</td><td>微软云生态</td></tr>
+<tr><td><strong>Cassandra</strong></td><td>已有 Cassandra</td><td>已有</td><td>数亿</td><td>已有 Cassandra / 全球分布</td></tr>
+<tr><td><strong>Vespa</strong></td><td>独立服务</td><td>Docker</td><td>数亿</td><td>Yahoo 开源 / 大规模</td></tr>
+<tr><td><strong>Neo4j</strong></td><td>图数据库</td><td>独立</td><td>千万级</td><td>知识图谱 + 向量</td></tr>
+<tr><td><strong>Tablestore</strong>(阿里云)</td><td>云服务</td><td>阿里云</td><td>无限制</td><td>国内合规首选</td></tr>
+</tbody>
+</table>
+
+<p><strong>5 维度选型决策</strong>:</p>
+
+<ul>
+  <li><strong>POC</strong>(几天搞定) → <code>InMemoryEmbeddingStore</code></li>
+  <li><strong>小公司(< 100 万向量)</strong> → <code>PGVector</code>(已有 PG) / <code>Redis</code>(已有 Redis)</li>
+  <li><strong>中等公司(100 万 - 1 亿)</strong> → <code>Qdrant</code>(开源 + 易部署)</li>
+  <li><strong>大企业(> 1 亿 / 多团队)</strong> → <code>Milvus</code> / <code>Pinecone</code>(托管)</li>
+  <li><strong>国内合规</strong> → <code>Tablestore</code>(阿里云) / PGVector(自建 PG)</li>
+  <li><strong>已有大数据组件</strong> → 选对应组件(ES / Mongo / Cassandra)</li>
+</ul>
+
+<h2>8. Document Splitter 速查</h2>
+
+<table>
+<thead><tr><th>Splitter</th><th>切分依据</th><th>chunk 数</th><th>适用</th></tr></thead>
+<tbody>
+<tr><td><code>DocumentByParagraphSplitter</code></td><td>段落边界</td><td>少</td><td>结构化文档(合同 / 报告)</td></tr>
+<tr><td><code>DocumentBySentenceSplitter</code></td><td>句子边界</td><td>中</td><td>叙述性文档(博客 / 文章)</td></tr>
+<tr><td><code>DocumentByCharacterSplitter</code></td><td>固定字符数</td><td>多</td><td>无明显结构(日志 / OCR)</td></tr>
+<tr><td><code>DocumentByRegexSplitter</code></td><td>正则表达式</td><td>自定义</td><td>Markdown / 代码块 / 自定义段落</td></tr>
+<tr><td><code>DocumentByWordSplitter</code></td><td>单词边界</td><td>多</td><td>英文 / 多语言混合</td></tr>
+</tbody>
+</table>
+
+<h3>8.1 推荐 chunk 配置</h3>
+
+<pre><code>// 中文场景(企业知识库 / 商品库)
+DocumentByParagraphSplitter.builder()
+    .maxChunkSize(500)       // 500 token ≈ 750 中文字
+    .chunkOverlap(100)       // 100 token 重叠(20%),保语义连续
+    .tokenizer(new HuggingFaceTokenizer("gpt2"))  // 通用 tokenizer
+    .build();
+
+// 英文场景(API 文档 / 论文)
+DocumentByParagraphSplitter.builder()
+    .maxChunkSize(300)       // 英文 300 token ≈ 200 词
+    .chunkOverlap(30)        // 30 token ≈ 10%
+    .build();
+
+// 自定义:Markdown 按 ## 切分
+DocumentByRegexSplitter.builder()
+    .regex("(?m)^##\\s")      // 匹配 Markdown 二级标题
+    .build();</code></pre>
+
+<blockquote class="mihuang">
+<strong>💡 Chunk Size 经验值</strong>:太小 → 语义断裂、检索不到完整概念;太大 → 噪声多、稀释 LLM 注意力。中文 400-600 token,英文 200-400 token 是 sweet spot。<strong>必须有 overlap(10-20%)</strong>,否则边界处语义会丢。
+</blockquote>
+
+<h2>9. 10 避坑</h2>
+
+<h3>坑 1 ❌ 用 InMemoryEmbeddingStore 做生产</h3>
+<p><strong>症状</strong>:重启服务后所有 Embedding 丢失,AI 答不上任何问题。<br>
+<strong>根因</strong>:<code>InMemoryEmbeddingStore</code> 只存 JVM 堆,进程退出即丢。<br>
+<strong>修法</strong>:生产用 PGVector / Qdrant / Pinecone 等持久化向量库。</p>
+
+<h3>坑 2 ❌ Embedding Model 维度不匹配</h3>
+<p><strong>症状</strong>:<code>IllegalArgumentException: Dimension mismatch</code><br>
+<strong>根因</strong>:换 embedding 模型(如 bge-small 384 → text-embedding-3-small 1536)但向量库还是旧维度。<br>
+<strong>修法</strong>:换模型时<strong>先 drop 表重建</strong>,再 reindex。<strong>维度一旦确定,不要随便换</strong>。</p>
+
+<h3>坑 3 ❌ Easy RAG 默认是英文模型</h3>
+<p><strong>症状</strong>:中文知识库检索效果差,语义匹配不上。<br>
+<strong>根因</strong>:Easy RAG SPI 默认装载 <code>bge-small-en-v1.5</code>,只懂英文。<br>
+<strong>修法</strong>:</p>
+<pre><code>// 显式注入中文模型
+EmbeddingModel embeddingModel = new BgeSmallZhV15QuantizedEmbeddingModel();
+EmbeddingStoreIngestor.builder()
+    .embeddingModel(embeddingModel)
+    .embeddingStore(embeddingStore)
+    .build()
+    .ingest(documents);</code></pre>
+
+<h3>坑 4 ❌ 没有 overlap 导致边界语义丢</h3>
+<p><strong>症状</strong>:检索"合同违约责任"时,关键段落正好在 chunk 边界被切断。<br>
+<strong>根因</strong>:<code>chunkOverlap=0</code> 导致两个相邻 chunk 完全不重叠。<br>
+<strong>修法</strong>:始终设 <code>chunkOverlap = maxChunkSize * 10%~20%</code>。</p>
+
+<h3>坑 5 ❌ 没设 minScore,垃圾结果污染 LLM</h3>
+<p><strong>症状</strong>:LLM 答非所问,prompt 里被注入了 5 段不相关的文档。<br>
+<strong>根因</strong>:<code>EmbeddingStoreContentRetriever</code> 默认 <code>maxResults=5, minScore=0</code>,返回所有"勉强相关"的段。<br>
+<strong>修法</strong>:</p>
+<pre><code>EmbeddingStoreContentRetriever.builder()
+    .embeddingStore(store)
+    .embeddingModel(model)
+    .maxResults(3)      // 少而精,3-5 个 sweet spot
+    .minScore(0.7)      // 过滤低分(< 0.6 几乎不相关)
+    .build();</code></pre>
+
+<h3>坑 6 ❌ Chunk 太大,塞爆 LLM 上下文窗口</h3>
+<p><strong>症状</strong>:长文档(5000 token)整段塞进 prompt,LLM 报错 "context length exceeded"。<br>
+<strong>根因</strong>:<code>maxChunkSize=10000</code>(> LLM 上下文窗口的 1/4)。<br>
+<strong>修法</strong>:单 chunk 不超过 LLM 上下文窗口的 10%(GPT-4 是 128K,所以单 chunk 不超过 12K token)。生产一般 300-800 token。</p>
+
+<h3>坑 7 ❌ Advanced RAG 里 QueryTransformer 顺序反了</h3>
+<p><strong>症状</strong>:用 ExpandingQueryTransformer 生成 5 个变体,然后 CompressingQueryTransformer 压缩回 1 个,等于白干。<br>
+<strong>根因</strong>:<code>Compressing</code> 应该是 <code>Expanding</code> 之前的步骤(先精炼问题,再扩展变体),或者只用其中一个。<br>
+<strong>修法</strong>:</p>
+<pre><code>// 正确顺序:先 Compressing(去噪)→ 再 Expanding(扩召回)
+DefaultRetrievalAugmentor.builder()
+    .queryTransformers(
+        new CompressingQueryTransformer(chatModel),  // 先
+        new ExpandingQueryTransformer(chatModel)    // 后
+    )</code></pre>
+
+<h3>坑 8 ❌ CompressingQueryTransformer 让上下文爆炸</h3>
+<p><strong>症状</strong>:多轮对话每轮都让 LLM 重新压缩整段历史,token 用量翻倍。<br>
+<strong>根因</strong>:CompressingQueryTransformer 默认读 <code>query.metadata().chatMemory()</code> 全量历史。<br>
+<strong>修法</strong>:对长对话(> 20 轮),只压缩最近 N 条:</p>
+<pre><code>CompressingQueryTransformer compressing = new CompressingQueryTransformer(chatModel, 5);  // 只压最近 5 条</code></pre>
+
+<h3>坑 9 ❌ Reranker 没调,精度差</h3>
+<p><strong>症状</strong>:召回 50 个候选段,top-3 注入 prompt,但实际上 top-3 不一定是最好的。<br>
+<strong>根因</strong>:向量相似度对长文档 / 复杂查询精度有限(只看语义不看相关性)。<br>
+<strong>修法</strong>:加 Re-ranking 步骤,把 50 候选用专门的重排序模型重排,取真正 top-3:</p>
+<pre><code>ContentAggregator aggregator = new ReRankingContentAggregator(
+    new CohereReranker(System.getenv("COHERE_API_KEY")),
+    3  // 最终注入 top-3
+);</code></pre>
+
+<h3>坑 10 ❌ Metadata 没设,检索过滤失效</h3>
+<p><strong>症状</strong>:<code>.filter(metadataKey("category").isEqualTo("electronics"))</code> 不生效。<br>
+<strong>根因</strong>:ingest 时没给 document 加 <code>category</code> 这个 metadata,数据库里都是空。<br>
+<strong>修法</strong>:ingest 时显式注入 metadata:</p>
+<pre><code>ingestor.ingest(documents.stream()
+    .map(doc -&gt; doc.transform(d -&gt; {
+        d.metadata().put("category", "electronics");
+        d.metadata().put("indexed_at", Instant.now().toString());
+        return d;
+    }))
+    .collect(Collectors.toList()));</code></pre>
+
+<h2>10. API 速查表(22 个)</h2>
+
+<table>
+<thead><tr><th>层级</th><th>类-接口</th><th>包路径</th><th>一句话作用</th></tr></thead>
+<tbody>
+<tr><td>索引</td><td><code>Document</code></td><td><code>dev.langchain4j.data.document</code></td><td>文档对象(原文 + metadata)</td></tr>
+<tr><td>索引</td><td><code>TextSegment</code></td><td><code>dev.langchain4j.data.segment</code></td><td>切分后的文本片段</td></tr>
+<tr><td>索引</td><td><code>DocumentLoader</code></td><td><code>dev.langchain4j.data.document</code></td><td>文档加载接口</td></tr>
+<tr><td>索引</td><td><code>FileSystemDocumentLoader</code></td><td><code>dev.langchain4j.data.document</code></td><td>从文件系统加载</td></tr>
+<tr><td>索引</td><td><code>UrlDocumentLoader</code></td><td><code>dev.langchain4j.data.document</code></td><td>从 URL 加载</td></tr>
+<tr><td>索引</td><td><code>DocumentSplitter</code></td><td><code>dev.langchain4j.data.document.splitter</code></td><td>切分接口</td></tr>
+<tr><td>索引</td><td><code>EmbeddingModel</code></td><td><code>dev.langchain4j.model.embedding</code></td><td>文本→向量</td></tr>
+<tr><td>存储</td><td><code>EmbeddingStore</code></td><td><code>dev.langchain4j.store.embedding</code></td><td>向量存储接口</td></tr>
+<tr><td>存储</td><td><code>InMemoryEmbeddingStore</code></td><td><code>dev.langchain4j.store.embedding.inmemory</code></td><td>内存实现(POC)</td></tr>
+<tr><td>存储</td><td><code>EmbeddingStoreIngestor</code></td><td><code>dev.langchain4j.store.embedding</code></td><td>一键 ingest 工具</td></tr>
+<tr><td>存储</td><td><code>EmbeddingSearchRequest</code></td><td><code>dev.langchain4j.store.embedding</code></td><td>检索请求对象</td></tr>
+<tr><td>检索</td><td><code>ContentRetriever</code></td><td><code>dev.langchain4j.rag.content.retriever</code></td><td>检索接口(Naive RAG 用)</td></tr>
+<tr><td>检索</td><td><code>EmbeddingStoreContentRetriever</code></td><td><code>dev.langchain4j.rag.content.retriever</code></td><td>基于向量库的检索实现</td></tr>
+<tr><td>检索</td><td><code>WebSearchContentRetriever</code></td><td><code>dev.langchain4j.rag.content.retriever</code></td><td>基于 Web 搜索的检索</td></tr>
+<tr><td>高级</td><td><code>RetrievalAugmentor</code></td><td><code>dev.langchain4j.rag</code></td><td>Advanced RAG 入口</td></tr>
+<tr><td>高级</td><td><code>DefaultRetrievalAugmentor</code></td><td><code>dev.langchain4j.rag</code></td><td>默认 Advanced RAG 实现</td></tr>
+<tr><td>高级</td><td><code>Query</code></td><td><code>dev.langchain4j.rag.query</code></td><td>查询对象(文本 + metadata)</td></tr>
+<tr><td>高级</td><td><code>QueryTransformer</code></td><td><code>dev.langchain4j.rag.query.transformer</code></td><td>查询改写接口</td></tr>
+<tr><td>高级</td><td><code>CompressingQueryTransformer</code></td><td><code>dev.langchain4j.rag.query.transformer</code></td><td>压缩 + 合并历史</td></tr>
+<tr><td>高级</td><td><code>ExpandingQueryTransformer</code></td><td><code>dev.langchain4j.rag.query.transformer</code></td><td>扩展为多个变体</td></tr>
+<tr><td>高级</td><td><code>QueryRouter</code></td><td><code>dev.langchain4j.rag.query.router</code></td><td>多路路由</td></tr>
+<tr><td>集成</td><td><code>AiServices.contentRetriever()</code></td><td><code>dev.langchain4j.service</code></td><td>把 RAG 挂到 AI Service</td></tr>
+</tbody>
+</table>
+
+<h2>11. 本章小结 + 下一章</h2>
+
+<ul>
+  <li><strong>3 种 RAG</strong>:Easy RAG 一行启动(POC) / Naive RAG 5 件套手动(中小)/ Advanced RAG 5 大组件(企业级)</li>
+  <li><strong>核心流程</strong>:索引(离线 DocumentLoader → Splitter → Embed → Store)+ 检索(在线 Query → Embed → Search → Inject)</li>
+  <li><strong>5 大组件</strong>:<code>QueryTransformer</code>(改写)→ <code>QueryRouter</code>(分发)→ <code>ContentRetriever</code>(拉数据)→ <code>ContentAggregator</code>(合并)→ <code>ContentInjector</code>(注入 prompt)</li>
+  <li><strong>向量库选型</strong>:POC InMemory / 中小 PGVector Redis / 中等 Qdrant / 大 Milvus Pinecone</li>
+  <li><strong>10 避坑</strong>:InMemory 不可生产 / 维度匹配 / Easy RAG 默认英文 / 必须 overlap / minScore 过滤 / chunk 大小 / Transformer 顺序 / Compressing 上下文爆炸 / Reranker 必要性 / Metadata 必填</li>
+  <li><strong>跨境电商专属</strong>:SKU 实时推荐 / 法规检索 / 客服 SOP / 多语言 FAQ / 合同审查 —— <strong>5 大场景全部 RAG 解</strong></li>
+</ul>
+
+<blockquote class="mihuang">
+<strong>口诀</strong>:<strong>Easy 起步</strong> → <strong>Naive 落地</strong> → <strong>Advanced 优化</strong>。先跑通,再换库,再加 Reranker,最后上 QueryTransformer。<strong>别一上来就 Advanced</strong>。
+</blockquote>
+
+<p><strong>下一章预告</strong>:ch15 <strong>Agents and Agentic AI</strong> —— RAG 是被动检索,Agent 是<strong>主动思考 + 工具循环</strong>。Agent 会用 RAG 当工具之一(查完资料再调 API),还会用 Tools(ch06)、Memory(ch02)、Structured Output(ch07),<strong>把前面 14 章的能力组合成"能自主干活的 AI 员工"</strong>。</p>
+
+<hr>
+<p class="footer-src">📖 本章基于官方文档:<a href="file:///E:/hermes_chat/langchain4j-html/RAG%20(Retrieval-Augmented%20Generation)%20_LangChain4j.html">RAG (Retrieval-Augmented Generation) _ LangChain4j.html</a> 提炼 + 实战扩展 · 内容仅基于 LangChain4j 官方资料,不与其他框架混搭</p>
+
+</main>
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch02 · Chat Memory · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">多轮对话 · ChatMemory 抽象</span>
+    <h1><span class="num">02</span>Chat Memory(聊天记忆)</h1>
+    <p class="lead">LLM 本身<strong>无状态</strong>。多轮对话靠 <code>ChatMemory</code> 维护 <code>ChatMessage</code> 链表 + 驱逐策略 + 持久化。本章讲官方 2 种开箱即用实现 + 自定义 Store 接口。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:<code>ChatMemory</code> = 一个 <code>List&lt;ChatMessage&gt;</code> 容器,带"按规则裁剪长度"和"按 ID 存外部数据库"两种能力。理解这个抽象,后面 AI Services 的 <code>@MemoryId</code> 就秒懂。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>用户问:"我的订单到哪了?" → 客服查 + 回答。下一句:"那物流单号呢?"。</p>
+  <p><strong>问题</strong>:第二次问的时候,模型并不知道你刚问了"我的订单到哪了"。因为每次 <code>chat()</code> 调用都是<strong>无状态</strong>的。</p>
+  <p><strong>解法</strong>:把第一次的 UserMessage + AiMessage 塞到 <code>ChatMemory</code>,第二次 <code>chat()</code> 之前先把整段历史读出来,一起发给 LLM,模型就"记起来了"。</p>
+
+  <h3>3 个真实使用场景</h3>
+  <ul>
+    <li><strong>多轮 AI 客服</strong> — 上下文连贯,用户不用每句重说背景</li>
+    <li><strong>AI 教学助手</strong> — 记住学生之前问过的薄弱知识点,针对性讲解</li>
+    <li><strong>角色扮演 / 陪伴机器人</strong> — 角色设定 + 长期记忆,聊 100 轮不"失忆"</li>
+  </ul>
+
+  <h2>2. 核心概念</h2>
+  <p><code>ChatMemory</code> 充当 <code>ChatMessage</code> 列表的容器,提供 3 件事:</p>
+  <ul>
+    <li><strong>存储</strong> — 内部就是个 <code>List&lt;ChatMessage&gt;</code></li>
+    <li><strong>驱逐(eviction)</strong> — 消息太多时按规则裁剪,控制 token 上限</li>
+    <li><strong>持久化(store)</strong> — 把消息存到外部 DB / Redis</li>
+  </ul>
+
+  <div class="callout warn">
+    <p><strong>⚠️ 重要区分</strong>:LangChain4j 只提供<strong>记忆(memory)</strong>管理,提供<strong>历史(history)</strong>管理。如果你需要完整保留所有对话(不裁剪),<code>ChatMemory</code> 做不到,得自己用 <code>ChatMemoryStore</code> 实现。</p>
+  </div>
+
+  <h2>3. 极简调用</h2>
+  <p>创建一个"按消息条数裁剪"的 memory,10 轮内自动保留:</p>
+  <pre><code><span class="ty">ChatMemory</span> memory = <span class="ty">MessageWindowChatMemory</span>.<span class="fn">withMaxMessages</span>(<span class="nm">10</span>);
+
+<span class="cm">// 第一轮</span>
+memory.<span class="fn">add</span>(<span class="ty">UserMessage</span>.<span class="fn">from</span>(<span class="st">"你好,我的名字叫张三"</span>));
+<span class="ty">AiMessage</span> ai1 = model.<span class="fn">chat</span>(memory.<span class="fn">messages</span>()).<span class="fn">aiMessage</span>();
+memory.<span class="fn">add</span>(ai1);
+
+<span class="cm">// 第二轮:memory 里自动带上一轮的"我叫张三"</span>
+memory.<span class="fn">add</span>(<span class="ty">UserMessage</span>.<span class="fn">from</span>(<span class="st">"我叫什么?"</span>));
+<span class="ty">AiMessage</span> ai2 = model.<span class="fn">chat</span>(memory.<span class="fn">messages</span>()).<span class="fn">aiMessage</span>();  <span class="cm">// → "你叫张三"</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>4. 2 种开箱即用实现</h2>
+
+  <h3>① MessageWindowChatMemory(按条数裁剪)</h3>
+  <pre><code><span class="ty">ChatMemory</span> memory = <span class="ty">MessageWindowChatMemory</span>.<span class="fn">withMaxMessages</span>(<span class="nm">20</span>);</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+  <p>保留最近 N 条消息,超出自动丢最老的。简单,适合 demo。</p>
+
+  <h3>② TokenWindowChatMemory(按 token 数裁剪)</h3>
+  <pre><code><span class="ty">ChatMemory</span> memory = <span class="ty">TokenWindowChatMemory</span>.<span class="fn">withMaxTokens</span>(<span class="nm">2000</span>, <span class="kw">new</span> <span class="ty">OpenAiTokenizer</span>());</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+  <p>保留最近 N 个 token 的消息,需要 tokenizer。生产推荐,严格控制费用。</p>
+
+  <h2>5. 持久化:ChatMemoryStore 接口</h2>
+  <p>默认 memory 存在内存,服务重启就丢。要持久化,实现 <code>ChatMemoryStore</code> 接口:</p>
+  <pre><code><span class="kw">class</span> <span class="ty">PersistentChatMemoryStore</span> <span class="kw">implements</span> <span class="ty">ChatMemoryStore</span> {
+    <span class="at">@Override</span>
+    <span class="kw">public</span> <span class="ty">List</span>&lt;<span class="ty">ChatMessage</span>&gt; <span class="fn">getMessages</span>(<span class="ty">Object</span> memoryId) {
+        <span class="cm">// TODO: 从 MySQL / Redis 读这个 memoryId 的所有消息</span>
+    }
+
+    <span class="at">@Override</span>
+    <span class="kw">public</span> <span class="kw">void</span> <span class="fn">updateMessages</span>(<span class="ty">Object</span> memoryId, <span class="ty">List</span>&lt;<span class="ty">ChatMessage</span>&gt; messages) {
+        <span class="cm">// TODO: 把消息写到 MySQL / Redis</span>
+    }
+
+    <span class="at">@Override</span>
+    <span class="kw">public</span> <span class="kw">void</span> <span class="fn">deleteMessages</span>(<span class="ty">Object</span> memoryId) {
+        <span class="cm">// TODO: 删除该 memoryId 的所有消息</span>
+    }
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <p>用法:把 store 注入 memory</p>
+  <pre><code><span class="ty">ChatMemory</span> memory = <span class="ty">MessageWindowChatMemory</span>.<span class="fn">builder</span>()
+        .<span class="fn">maxMessages</span>(<span class="nm">10</span>)
+        .<span class="fn">chatMemoryStore</span>(<span class="kw">new</span> <span class="ty">PersistentChatMemoryStore</span>())
+        .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>6. 4 个特殊处理</h2>
+
+  <h3>① SystemMessage 特殊待遇</h3>
+  <p>SystemMessage(<code>你是一个 XX 助手</code>)<strong>永远保留</strong>,不会被驱逐。其它消息被裁掉时它还在最前面。</p>
+
+  <h3>② 工具消息防孤立</h3>
+  <p>如果 <code>AiMessage</code> 里的 <code>ToolExecutionRequest</code> 被驱逐,对应的 <code>ToolExecutionResultMessage</code> 也会被自动驱逐。<strong>避免 OpenAI 等厂商报"孤立工具消息"错误</strong>。</p>
+
+  <h2>7. memoryId 多用户隔离</h2>
+  <p><code>Object memoryId</code> 是关键 —— 它对应"哪个用户/哪个对话窗口"。同一进程内可以开 N 个 memory 实例,每个用户一个:</p>
+  <pre><code><span class="ty">Map</span>&lt;<span class="ty">String</span>, <span class="ty">ChatMemory</span>&gt; userMemories = <span class="kw">new</span> <span class="ty">ConcurrentHashMap</span>&lt;&gt;();
+
+<span class="ty">ChatMemory</span> <span class="fn">getMemory</span>(<span class="ty">String</span> userId) {
+    <span class="kw">return</span> userMemories.<span class="fn">computeIfAbsent</span>(userId, k -&gt;
+        <span class="ty">MessageWindowChatMemory</span>.<span class="fn">withMaxMessages</span>(<span class="nm">10</span>));
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>8. 避坑指南</h2>
+
+  <div class="pitfall">
+    <h3>坑 1 · 内存 memory 进程重启 = 全部失忆</h3>
+    <p><code>MessageWindowChatMemory.withMaxMessages(N)</code> 默认存<strong>堆内存</strong>。生产环境一定要接 <code>ChatMemoryStore</code>(Redis/MySQL),否则用户每次重启都"第一次见面"。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 2 · SystemMessage 不能用 chat() 字符串重载塞</h3>
+    <p>想要"我的人设"提示词,必须 <code>memory.add(SystemMessage.from(...))</code>。用 <code>chat("你叫小爱")</code> 没用,只是普通 UserMessage。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 3 · 按条数裁剪不控制 token 费用</h3>
+    <p><code>withMaxMessages(20)</code> 看起来 20 条不多,但如果每条都很长(几 KB),总 token 可能超 8000。生产<strong>优先 TokenWindowChatMemory</strong>。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 4 · memoryId 一定要稳定,别每次新建</h3>
+    <p>用 <code>UUID.randomUUID()</code> 当 memoryId = 每次创建新 memory = 用户"每次都失忆"。必须是<strong>用户 ID / 会话 ID</strong>这种稳定 key。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 5 · getMessages() 是热路径,别查慢库</h3>
+    <p>每次 LLM 调用都会触发 <code>store.getMessages(memoryId)</code>。如果背后是 MySQL 全表扫描,直接拖垮接口。<strong>必须走主键查询 + 缓存</strong>。</p>
+  </div>
+
+  <h2>9. 记忆口诀</h2>
+  <div class="mnemonic">
+    <h3>🎓 4 行口诀</h3>
+    <pre>ChatMemory 是个 Message 容器, 三件事 存 裁 持久化
+MessageWindow 按条裁, TokenWindow 按 token 卡
+SystemMessage 永不被裁, 工具消息防孤立
+memoryId 走用户 ID 稳定值, 重启靠 Store 不失忆</pre>
+  </div>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 基础篇 · ch02 v1 浅版 · 源:<code>Chat Memory _ LangChain4j.html</code></p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

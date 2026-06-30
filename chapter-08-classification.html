@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch08 · Classification · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">文本分类 · 情感/意图/实体</span>
+    <h1><span class="num">08</span>Classification(文本分类)</h1>
+    <p class="lead">把一段文字归到<strong>预定义标签</strong>里:情感(正/负/中)、意图(查订单/退订/投诉)、实体(人名/地名/公司)。LangChain4j 提供<strong>2 种实现路径</strong>:LLM 直接判 vs 向量相似度。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:AI Service 模式返回 <code>enum</code> 或 <code>boolean</code> = 极简分类。零成本上手,适合 90% 业务。要快 + 不烧 token 选 <code>EmbeddingModelTextClassifier</code>。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>老板:"每天 10000 条用户评论,人工分类要 3 个客服。我们要做自动情感分类:正面/中性/负面,负面自动转人工处理。"</p>
+  <p>这就是典型的<strong>文本分类</strong>任务。LLM 时代前用 BERT 微调,现在直接让 LLM 判。</p>
+
+  <h3>3 个真实场景</h3>
+  <ul>
+    <li><strong>客户评论情感分析</strong> — 正面 / 中性 / 负面 → 负面自动告警</li>
+    <li><strong>用户意图识别</strong> — 查订单 / 退订 / 投诉 → 路由到不同 AI 服务</li>
+    <li><strong>垃圾评论过滤</strong> — 广告 / 正常 / 违规 → 违规直接屏蔽</li>
+  </ul>
+
+  <h2>2. 2 种实现方法</h2>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>原理</th><th>速度</th><th>成本</th><th>准确度</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>AI Service 判别</strong></td><td>LLM 直接读文字判断</td><td>1-3 秒</td><td>每次调 LLM</td><td>高(可理解上下文)</td></tr>
+      <tr><td><strong>EmbeddingModelTextClassifier</strong></td><td>向量化 + 余弦相似度匹配</td><td>毫秒级</td><td>本地推理</td><td>中(依赖样例质量)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 方法 ①:AI Service 情感分类(主流)</h2>
+  <p>用 ch05 的 AI Service 模式,直接返回 enum:</p>
+  <pre><code><span class="kw">enum</span> <span class="ty">Sentiment</span> { <span class="at">POSITIVE</span>, <span class="at">NEUTRAL</span>, <span class="at">NEGATIVE</span> }
+
+<span class="kw">interface</span> <span class="ty">SentimentClassifier</span> {
+    <span class="at">@UserMessage</span>(<span class="st">"判断下面评论的情感倾向(只能从 POSITIVE/NEUTRAL/NEGATIVE 选一个):\n\n{{it}}"</span>)
+    <span class="ty">Sentiment</span> <span class="fn">classify</span>(<span class="ty">String</span> text);
+}
+
+<span class="cm">// 创建 + 调用</span>
+<span class="ty">SentimentClassifier</span> classifier = <span class="ty">AiServices</span>.<span class="fn">create</span>(<span class="ty">SentimentClassifier</span>.<span class="kw">class</span>, chatModel);
+<span class="ty">Sentiment</span> s = classifier.<span class="fn">classify</span>(<span class="st">"这家店服务太棒了!下次还来。"</span>);
+<span class="ty">System</span>.<span class="fn">out</span>.<span class="fn">println</span>(s);   <span class="cm">// → POSITIVE</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <p>返回 <code>boolean</code> = 极简二分类:</p>
+  <pre><code><span class="kw">interface</span> <span class="ty">SpamDetector</span> {
+    <span class="at">@UserMessage</span>(<span class="st">"Is the following text spam? Text: {{it}}"</span>)
+    <span class="ty">boolean</span> <span class="fn">isSpam</span>(<span class="ty">String</span> text);
+}
+
+<span class="ty">SpamDetector</span> detector = <span class="ty">AiServices</span>.<span class="fn">create</span>(<span class="ty">SpamDetector</span>.<span class="kw">class</span>, chatModel);
+<span class="kw">boolean</span> spam = detector.<span class="fn">isSpam</span>(<span class="st">"加我微信 xxx 优惠..."</span>);   <span class="cm">// → true</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>4. Few-shot 提升准确度</h2>
+  <p>LLM 分类"模糊地带"会猜错。给它几个<strong>示例</strong>(Few-shot)准确度立刻提升:</p>
+  <pre><code><span class="kw">interface</span> <span class="ty">SentimentClassifier</span> {
+    <span class="at">@UserMessage</span>(<span class="st">"""</span>
+        <span class="st">判断下面评论的情感倾向,只能从 POSITIVE / NEUTRAL / NEGATIVE 选一个。</span>
+
+        <span class="st">示例:</span>
+        <span class="st">评论: "太好用了!推荐给朋友" → POSITIVE</span>
+        <span class="st">评论: "一般般,没什么特别" → NEUTRAL</span>
+        <span class="st">评论: "差评,再也不会买了" → NEGATIVE</span>
+
+        <span class="st">现在判断:</span>
+        <span class="st">评论: {{it}}</span>
+        <span class="st">"""</span>)
+    <span class="ty">Sentiment</span> <span class="fn">classify</span>(<span class="ty">String</span> text);
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>5. 方法 ②:EmbeddingModelTextClassifier(本地快)</h2>
+  <p>用向量相似度匹配 —— <strong>不调 LLM</strong>,纯本地推理:</p>
+  <pre><code><span class="kw">import</span> <span class="ty">dev</span>.langchain4j.classification.<span class="ty">EmbeddingModelTextClassifier</span>;
+<span class="kw">import</span> <span class="ty">dev</span>.langchain4j.model.embedding.onnx.allminilml6v2q.<span class="ty">AllMiniLmL6V2QuantizedEmbeddingModel</span>;
+
+<span class="ty">EmbeddingModel</span> embeddingModel = <span class="kw">new</span> <span class="ty">AllMiniLmL6V2QuantizedEmbeddingModel</span>();
+
+<span class="ty">TextClassifier</span>&lt;<span class="ty">String</span>&gt; classifier = <span class="ty">EmbeddingModelTextClassifier</span>.<span class="fn">builder</span>()
+        .<span class="fn">embeddingModel</span>(embeddingModel)
+        .<span class="fn">examples</span>(<span class="ty">Map</span>.<span class="fn">of</span>(
+            <span class="st">"POSITIVE"</span>, <span class="ty">List</span>.<span class="fn">of</span>(<span class="st">"太棒了"</span>, <span class="st">"非常满意"</span>, <span class="st">"推荐"</span>, <span class="st">"完美"</span>),
+            <span class="st">"NEGATIVE"</span>, <span class="ty">List</span>.<span class="fn">of</span>(<span class="st">"垃圾"</span>, <span class="st">"差评"</span>, <span class="st">"再也不买"</span>, <span class="st">"浪费时间"</span>),
+            <span class="st">"NEUTRAL"</span>,  <span class="ty">List</span>.<span class="fn">of</span>(<span class="st">"一般"</span>, <span class="st">"还行"</span>, <span class="st">"凑合"</span>, <span class="st">"可以接受"</span>)
+        ))
+        .<span class="fn">build</span>();
+
+<span class="ty">String</span> result = classifier.<span class="fn">classify</span>(<span class="st">"这家店服务太棒了!"</span>);
+<span class="ty">System</span>.<span class="fn">out</span>.<span class="fn">println</span>(result);   <span class="cm">// → POSITIVE</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout tip">
+    <p><strong>💡 优势</strong>:不调 LLM → <strong>零 token 费用</strong>+ 毫秒级响应。10000 条评论批量分类 = 几秒搞定。适合离线批处理 / 高频低价值场景。</p>
+  </div>
+
+  <h2>6. 2 种方法选型决策</h2>
+  <div class="svg-box">
+    <svg viewBox="0 0 720 240" xmlns="http://www.w3.org/2000/svg">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">"用 AI Service 还是 EmbeddingTextClassifier?"</text>
+
+      <rect x="280" y="40" width="160" height="36" rx="8" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+      <text x="360" y="62" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">判断标准</text>
+
+      <line x1="360" y1="76" x2="120" y2="120" stroke="#94a3b8" stroke-width="1"/>
+      <line x1="360" y1="76" x2="600" y2="120" stroke="#94a3b8" stroke-width="1"/>
+
+      <text x="220" y="100" font-size="12" font-weight="600" fill="#15803d">AI Service</text>
+      <text x="500" y="100" font-size="12" font-weight="600" fill="#b45309">Embedding</text>
+
+      <rect x="40" y="130" width="160" height="80" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+      <text x="120" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">AI Service</text>
+      <text x="120" y="172" text-anchor="middle" font-size="11" fill="#334155">· 类目 ≤ 10</text>
+      <text x="120" y="188" text-anchor="middle" font-size="11" fill="#334155">· 需要理解上下文</text>
+      <text x="120" y="204" text-anchor="middle" font-size="11" fill="#334155">· 数据量小(&lt;1万/天)</text>
+
+      <rect x="520" y="130" width="160" height="80" rx="8" fill="#fff4e6" stroke="#e07a3b" stroke-width="1"/>
+      <text x="600" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#b45309">Embedding</text>
+      <text x="600" y="172" text-anchor="middle" font-size="11" fill="#334155">· 简单正负/正负中</text>
+      <text x="600" y="188" text-anchor="middle" font-size="11" fill="#334155">· 数据量大(&gt;1万/天)</text>
+      <text x="600" y="204" text-anchor="middle" font-size="11" fill="#334155">· 控制成本</text>
+    </svg>
+  </div>
+
+  <h2>7. 避坑指南</h2>
+
+  <div class="pitfall">
+    <h3>坑 1 · enum 标签名一定要全大写</h3>
+    <p>返回 <code>Sentiment</code> 时 LLM 要把字符串解析成 enum。如果你的 enum 是 <code>Positive / Negative</code>(驼峰),LangChain4j 解析时可能大小写不匹配。建议 <strong>用 <code>POSITIVE / NEUTRAL / NEGATIVE</code> 全大写</strong>,与 Java enum 常量命名一致。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 2 · LLM 分类有"幻觉率"</h3>
+    <p>LLM 不会 100% 准确。"一般般" 是 NEUTRAL 还是 NEGATIVE?边界<strong>模糊</strong>的样本准确率可能只有 80%。如果业务要求 ≥95%,要么加 Few-shot 示例,要么用 EmbeddingClassifier + 人工校验。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 3 · 分类是 LLM 任务,不是"思维链"</h3>
+    <p>不要在 prompt 里写"先分析原因再判断" — 浪费 token 又慢。直接给指令 + 标签 + (可选 Few-shot),让它直接出答案。返回 <code>Result&lt;Sentiment&gt;</code> 还能拿到 token 用量。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 4 · EmbeddingTextClassifier 样例要"代表性强"</h3>
+    <p>每类至少 5-10 个<strong>典型样例</strong>。如果只给"好"/"坏"两个词,模型会把"出色"判成负面(因为跟"坏"在向量空间近)。多给几个同义词变体。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 5 · 分类超 20 类 = LLM 也搞不定</h3>
+    <p>LLM 一次能"记住"的标签数 ≈ 10-20。超过这个数(比如 100 个细分类目)准确率断崖下跌。要么<strong>二级分类</strong>(先大类别,再小类别),要么用专业微调模型。</p>
+  </div>
+
+  <h2>8. 记忆口诀</h2>
+  <div class="mnemonic">
+    <h3>🎓 4 行口诀</h3>
+    <pre>分类任务两条路, AI Service 判 / Embedding 算
+枚举标签全大写, Few-shot 提升边界准确度
+数据量大用 Embedding 省 token, 类目少于 10 选 LLM
+模糊边界准确率 80% 封顶, 要 95% 加示例加人工核</pre>
+  </div>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 基础篇 · ch08 v1 浅版 · 源:<code>Classification _ LangChain4j.html</code></p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

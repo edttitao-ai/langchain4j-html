@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch19 · Skills · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">19</span>Skills(可重用指令包 + 技能范围工具)</h1>
+    <p class="hero-sub">SKILL.md + 资源 + 工具模式 + Shell 模式(实验性)+ Agent Skills 规范对齐</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<strong>Skill = name + description + content(指令主体)+ 可选资源</strong>,符合 <a href="https://agentskills.io/">Agent Skills 规范</a>,从文件系统/类路径/编程方式加载,通过 <code>activate_skill</code> 工具按需加载到上下文。2 种模式:<strong>工具模式(安全,推荐)+ Shell 模式(实验性,不安全)</strong>。⚠️ <strong>实验性 API</strong>。</p>
+
+<p><strong>核心思想</strong>:LLM 初始上下文保持简洁,只有<strong>技能名 + 描述</strong>的目录;需要执行时 LLM 调 <code>activate_skill("name")</code> 才把详细指令注入上下文 —— 类似"按需加载的 skill library",不是一次性塞满。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"我们的 AI 客服现在 system prompt 已经塞了 8000 字(订单处理/退换货/物流查询/发票申请/投诉升级 5 大场景)。每加一个新场景就要重训,Token 费蹭蹭涨。怎么办?"</p>
+
+<p><strong>解法</strong>:用 <strong>Skill</strong> 把每个场景的指令(<code>SKILL.md</code>)+ 资源(模板/规则)拆成独立文件。系统 prompt 只放<strong>技能目录</strong>(5 个名字 + 一句话描述),LLM 看到用户问题匹配某技能时,才调 <code>activate_skill("order-process")</code> 加载那一个的详细指令 —— 上下文减半,Token 费 -40%,加新场景零改动。</p>
+
+<h3>6 个 Skills 能解决的事</h3>
+<ul>
+  <li><strong>📚 Prompt 工程瘦身</strong> — System prompt 8000 → 500(只剩技能目录),LLM 按需加载,Token 费砍 40%</li>
+  <li><strong>🧩 场景模块化</strong> — 订单/退换货/物流/发票/投诉各一个 <code>SKILL.md</code>,加新场景零侵入</li>
+  <li><strong>🔒 工具按需暴露</strong> — "订单处理"技能激活时,才把 <code>validateOrder</code>/<code>chargePayment</code> 等订单工具塞给 LLM(避免工具爆炸)</li>
+  <li><strong>📁 资源懒加载</strong> — 技能指令里引用 <code>references/tone-guide.md</code>,LLM 用 <code>read_skill_resource</code> 按需读</li>
+  <li><strong>🔌 第三方技能复用</strong> — Agent Skills 规范(agentskills.io 生态)发布的技能直接用,不用移植 Java</li>
+  <li><strong>📦 版本管理</strong> — <code>SKILL.md</code> 是文件,进 Git,跟代码一起 review,改一次看得见</li>
+</ul>
+
+<p><strong>💡 什么时候不需要</strong>:单一场景 / 1-2 个工具 / system prompt 短 / LLM 一直用同一套指令 —— 直接写 system prompt 就行。Skill 是"场景多 + 工具多 + 指令长"的优化方案。</p>
+
+<blockquote class="mihuang">
+  <strong>口诀</strong>:Skill = 技能目录(轻量 system prompt)+ 详细指令(按需 <code>activate_skill</code>)+ 资源(按需 <code>read_skill_resource</code>)。<strong>工具模式 = 安全(只调你注册的 Java 工具),Shell 模式 = 危险(LLM 可执行任意 shell 命令,慎用!)</strong>。99% 场景用工具模式,Shell 模式只用于本地原型。
+</blockquote>
+
+<h2>2. 核心机制:Skill 是什么?</h2>
+
+<p>一个 Skill = <strong>name(机器读)+ description(LLM 读)+ content(指令主体,激活时注入)+ 可选 resources(按需读)</strong>。</p>
+
+<h3>2.1 SKILL.md 文件结构</h3>
+
+<pre><code>skills/
+├── docx/                          ← 技能 1:Word 文档编辑
+│   ├── SKILL.md                   ← 必需:YAML 前置 + 指令主体
+│   └── references/                ← 可选:资源子目录
+│       └── tracked-changes.md
+├── data-analysis/                 ← 技能 2:数据分析
+│   └── SKILL.md
+└── process-order/                 ← 技能 3:订单处理
+    ├── SKILL.md
+    └── references/
+        └── refund-policy.md</code></pre>
+
+<p><strong>SKILL.md 模板</strong>(YAML 前置 + Markdown 主体):</p>
+
+<pre><code>---
+name: docx
+description: Edit and review Word documents using tracked changes
+---
+
+When the user asks you to edit a Word document:
+1. Always use tracked changes so edits can be reviewed.
+2. ...</code></pre>
+
+<p><strong>规则</strong>:</p>
+<ul>
+  <li><code>SKILL.md</code> 必需,文件名固定</li>
+  <li>YAML 前置 <strong>必须</strong>有 <code>name</code> 和 <code>description</code> 两个字段</li>
+  <li>YAML 之后的 Markdown 是指令主体(LLM 激活技能时收到)</li>
+  <li><code>references/</code> 子目录下所有文件自动加载为 <code>SkillResource</code></li>
+  <li><code>scripts/</code> 子目录<strong>不自动加载</strong>(给 Shell 模式用,工具模式跳过)</li>
+</ul>
+
+<h2>3. 加载方式(3 种)</h2>
+
+<h3>3.1 从文件系统</h3>
+
+<pre><code>&lt;!-- pom.xml --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;dev.langchain4j&lt;/groupId&gt;
+    &lt;artifactId&gt;langchain4j-skills&lt;/artifactId&gt;
+    &lt;version&gt;1.11.8-beta19&lt;/version&gt;
+&lt;/dependency&gt;</code></pre>
+
+<pre><code>// 加载 skills/ 下所有一级子目录的技能
+List&lt;FileSystemSkill&gt; skills = FileSystemSkillLoader.loadSkills(Path.of("skills/"));
+
+// 加载单个技能
+FileSystemSkill skill = FileSystemSkillLoader.loadSkill(Path.of("skills/docx"));</code></pre>
+
+<h3>3.2 从类路径</h3>
+
+<p>适合技能打包在 JAR 或 <code>src/main/resources</code>:</p>
+
+<pre><code>src/main/resources/
+└── skills/
+    ├── docx/
+    │   ├── SKILL.md
+    │   └── references/tracked-changes.md
+    └── data-analysis/
+        └── SKILL.md</code></pre>
+
+<pre><code>// 加载类路径下所有技能
+List&lt;FileSystemSkill&gt; skills = ClassPathSkillLoader.loadSkills("skills");
+
+// 加载单个
+FileSystemSkill skill = ClassPathSkillLoader.loadSkill("skills/docx");
+
+// 自定义 ClassLoader(可选)
+FileSystemSkill skill = ClassPathSkillLoader.loadSkill("skills/docx", myClassLoader);</code></pre>
+
+<p><strong>默认用线程上下文 ClassLoader</strong>。Spring Boot 场景下,放在 <code>src/main/resources/skills/</code> 一打包,运行时 <code>ClassPathSkillLoader.loadSkills("skills")</code> 自动加载。</p>
+
+<h3>3.3 编程方式(从任意源)</h3>
+
+<p>技能不必基于文件,数据库/远程 API/运行时生成都行:</p>
+
+<pre><code>// 1. 纯编程构建
+Skill skill = Skill.builder()
+    .name("incident-response")
+    .description("Step-by-step runbook for diagnosing and resolving production incidents")
+    .content("""
+        When a production alert fires:
+        1. Call `fetchRecentLogs(serviceName)` to retrieve the last 5 minutes of logs.
+        2. Call `checkServiceHealth(serviceName)` to get current health metrics.
+        3. Based on the findings, call `createIncidentTicket(summary, severity)`.
+        4. If severity is CRITICAL, also call `pageOnCall(incidentId)`.
+        """)
+    .build();
+
+// 2. 附加资源
+SkillResource reference = SkillResource.builder()
+    .relativePath("references/tone-guide.md")
+    .content("Use warm, concise language. Avoid jargon.")
+    .build();
+
+Skill skill2 = Skill.builder()
+    .name("customer-support")
+    .description("Handles customer support inquiries")
+    .content("Follow the tone guide in references/tone-guide.md ...")
+    .resources(List.of(reference))
+    .build();</code></pre>
+
+<p><strong>3 种方式可以混用</strong> —— 先用 <code>FileSystemSkillLoader</code> 加载本地技能,再 <code>toBuilder().resources(...).build()</code> 加运行时资源。</p>
+
+<h2>4. 模式 1:工具模式(推荐,安全)</h2>
+
+<p>对应 <a href="https://agentskills.io/">Agent Skills 规范</a> 中"基于工具的代理集成方法"。<strong>LLM 看不到文件系统</strong> —— 所有技能内容和资源<strong>预加载到内存</strong>,通过 2 个工具返回:</p>
+
+<table>
+<thead><tr><th>工具</th><th>何时注册</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><code>activate_skill</code></td><td><strong>总是</strong>注册</td><td>LLM 调 <code>activate_skill("name")</code> → 把技能完整指令加载到上下文</td></tr>
+<tr><td><code>read_skill_resource</code></td><td>当至少一个技能有资源时</td><td>LLM 调 <code>read_skill_resource("name", "references/foo.md")</code> → 按需读资源</td></tr>
+</tbody>
+</table>
+
+<p><strong>核心安全保证</strong>:LLM <strong>只能调你预定义的工具</strong>,<strong>不存在任意代码执行的风险</strong>。所有技能内容在 Java 侧预加载,LLM 调 <code>activate_skill</code> 返回的是<strong>内存中的字符串</strong>,不是从磁盘读。</p>
+
+<h3>4.1 接线 5 步</h3>
+
+<pre><code>import dev.langchain4j.skills.Skills;
+import dev.langchain4j.skills.FileSystemSkillLoader;
+import java.nio.file.Path;
+
+// 1. 加载技能
+List&lt;FileSystemSkill&gt; loadedSkills = FileSystemSkillLoader.loadSkills(Path.of("skills/"));
+
+// 2. 包成 Skills(可附加定制)
+Skills skills = Skills.from(loadedSkills);
+
+// 3. 构建 AI Service
+MyAiService service = AiServices.builder(MyAiService.class)
+    .chatModel(chatModel)
+    .tools(new OrderTools())                       // ← 你的常规工具
+    .toolProvider(skills.toolProvider())           // ← 技能 + 技能范围工具
+    // 或: .toolProviders(myToolProvider, skills.toolProvider())
+    .systemMessage("You have access to the following skills:\n"
+        + skills.formatAvailableSkills()           // ← XML 格式技能目录
+        + "\nWhen the user's request relates to one of these skills, "
+        + "activate it first using the `activate_skill` tool before proceeding.")
+    .build();</code></pre>
+
+<p><strong>5 行</strong>(不算 import),完整接入 Skills。</p>
+
+<h3>4.2 formatAvailableSkills() 返回什么</h3>
+
+<p>XML 格式的技能目录(LangChain4j 自动注入到 system message):</p>
+
+<pre><code>&lt;available_skills&gt;
+  &lt;skill&gt;
+    &lt;name&gt;process-order&lt;/name&gt;
+    &lt;description&gt;Processes a customer order end-to-end&lt;/description&gt;
+  &lt;/skill&gt;
+  &lt;skill&gt;
+    &lt;name&gt;data-analysis&lt;/name&gt;
+    &lt;description&gt;Analyse tabular data and produce charts&lt;/description&gt;
+  &lt;/skill&gt;
+&lt;/available_skills&gt;</code></pre>
+
+<p>LLM 看到这段,就能根据 description 判断"用户问题匹配哪个技能",调 <code>activate_skill("process-order")</code> 加载那一个的详细指令。</p>
+
+<h3>4.3 实战:订单处理技能</h3>
+
+<p><strong>skills/process-order/SKILL.md</strong>:</p>
+
+<pre><code>---
+name: process-order
+description: Processes a customer order end-to-end
+---
+
+To process an order:
+1. Call `validateOrder(orderId)` to check the order is valid.
+2. Call `reserveInventory(orderId)` to reserve the required stock.
+3. Only if reservation succeeds, call `chargePayment(orderId)`.
+4. Finally, call `sendConfirmationEmail(orderId)`.
+If any step fails, call `rollbackOrder(orderId)` before reporting the error.</code></pre>
+
+<p><strong>OrderTools.java</strong>(你的 Java 业务代码):</p>
+
+<pre><code>class OrderTools {
+    @Tool("Validates a customer order by ID")
+    String validateOrder(String orderId) {
+        // 业务校验
+        return "valid";
+    }
+
+    @Tool("Reserves inventory for an order")
+    String reserveInventory(String orderId) {
+        // 锁库存
+        return "reserved";
+    }
+
+    @Tool("Charges payment for a customer order")
+    String chargePayment(String orderId) {
+        // 扣款
+        return "charged";
+    }
+}</code></pre>
+
+<p><strong>特点</strong>:</p>
+<ul>
+  <li>SKILL.md 描述"策略"(调用顺序、参数、错误处理)</li>
+  <li>OrderTools 是"执行"(类型安全的 Java 代码,单测可覆盖)</li>
+  <li>策略和执行分离 —— 改流程只动 SKILL.md,改实现只动 Java</li>
+</ul>
+
+<h2>5. 模式 2:技能范围工具(Skill-Scoped)</h2>
+
+<p>常规 <code>.tools(...)</code> 一次全塞给 LLM,<strong>技能范围工具</strong>只在<strong>技能激活后</strong>才暴露 —— 保持 LLM 工具列表精简。</p>
+
+<h3>5.1 3 种挂载方式</h3>
+
+<p><strong>方式 1:<code>@Tool</code> 注解方法(最简单)</strong></p>
+
+<pre><code>Skill skill = Skill.builder()
+    .name("process-order")
+    .description("Processes a customer order end-to-end")
+    .content("To process an order:\n  1. Call `validateOrder(orderId)`\n  2. Call `chargePayment(orderId)`")
+    .tools(new OrderTools())   // ← @Tool 方法自动注册
+    .build();</code></pre>
+
+<p>已加载的技能也能加工具(<code>toBuilder()</code>):</p>
+
+<pre><code>FileSystemSkill skill = FileSystemSkillLoader.loadSkill(Path.of("skills/process-order"));
+Skill skillWithTools = skill.toBuilder()
+    .tools(new OrderTools())
+    .build();</code></pre>
+
+<p><strong>方式 2:ToolProvider(动态工具,适合 MCP)</strong></p>
+
+<pre><code>ToolProvider mcpToolProvider = McpToolProvider.builder()
+    .mcpClients(mcpClient)
+    .toolFilter((tool, mcpClient) -&gt; tool.name().startsWith("inventory_"))
+    .build();
+
+Skill skill = Skill.builder()
+    .name("inventory-management")
+    .description("Manages warehouse inventory")
+    .content("Use inventory tools to check stock levels and update quantities.")
+    .toolProviders(mcpToolProvider)   // ← MCP 工具按需暴露
+    .build();</code></pre>
+
+<p><strong>方式 3:<code>Map&lt;ToolSpecification, ToolExecutor&gt;</code>(完全控制)</strong></p>
+
+<pre><code>ToolSpecification validateOrder = ToolSpecification.builder()
+    .name("validateOrder")
+    .description("Validates a customer order by ID")
+    .addParameter("orderId", JsonSchemaProperty.STRING,
+        JsonSchemaProperty.description("The order ID"))
+    .build();
+
+ToolExecutor validateOrderExecutor = (request, memoryId) -&gt; {
+    String orderId = parseOrderId(request.arguments());
+    return validate(orderId);
+};
+
+Skill skill = Skill.builder()
+    .name("process-order")
+    .description("Processes a customer order end-to-end")
+    .content("1. Call `validateOrder(orderId)`")
+    .tools(Map.of(validateOrder, validateOrderExecutor))
+    .build();</code></pre>
+
+<p><strong>3 种可以组合</strong>(<code>@Tool</code> 方法 + ToolProvider + Map 合并):</p>
+
+<pre><code>Skill skill = Skill.builder()
+    .name("process-order")
+    .description("Processes a customer order end-to-end")
+    .content("...")
+    .tools(new OrderTools())                            // ① @Tool 方法
+    .tools(Map.of(validateOrder, validateOrderExecutor)) // ② Map
+    .toolProviders(mcpToolProvider)                      // ③ ToolProvider
+    .build();</code></pre>
+
+<h3>5.2 技能范围工具工作原理</h3>
+
+<ol>
+  <li><strong>激活前</strong>:LLM 只看到 <code>activate_skill</code>(和 <code>read_skill_resource</code>),技能范围工具<strong>不出现</strong>在工具列表</li>
+  <li>LLM 调 <code>activate_skill("process-order")</code> → 激活信息记入 <code>ToolExecutionResultMessage</code></li>
+  <li><strong>下一次 LLM 调用前</strong>(同一 AI Service 调用内),AI Service <strong>重新评估动态工具提供者</strong>,技能范围工具(<code>validateOrder</code>)<strong>变可见</strong></li>
+  <li>LLM <strong>同一 Service 调用内立即可调</strong>技能范围工具</li>
+  <li>技能范围工具在<strong>后续 AI Service 调用中保持可见</strong>,直到技能被停用</li>
+</ol>
+
+<p><strong>关键</strong>:<strong>激活是 sticky 的</strong>(一次激活,后续 AI Service 调用都能用),直到显式停用。</p>
+
+<h3>5.3 工具搜索协作(进阶)</h3>
+
+<p>技能可以跟 <strong>工具搜索</strong>(<code>SimpleToolSearchStrategy</code>)协同:</p>
+<ul>
+  <li><strong>技能范围工具不参与搜索</strong>(<code>tool_search_tool</code> 找不到它们)</li>
+  <li><strong>常规工具(<code>.tools(...)</code>)可搜索</strong></li>
+  <li><code>activate_skill</code> 标 <code>ALWAYS_VISIBLE</code>,<strong>始终可调</strong></li>
+</ul>
+
+<pre><code>MyAiService service = AiServices.builder(MyAiService.class)
+    .chatModel(chatModel)
+    .tools(new MySearchableTools())          // 常规工具,可搜索
+    .toolProvider(skills.toolProvider())     // 技能范围工具,不参与搜索
+    .toolSearchStrategy(new SimpleToolSearchStrategy())
+    .systemMessage("...")
+    .build();</code></pre>
+
+<h2>6. 定制(覆盖默认工具名/描述/参数)</h2>
+
+<p>默认 <code>activate_skill</code> 工具名 / <code>read_skill_resource</code> 工具名 / 参数名都可以改:</p>
+
+<pre><code>Skills skills = Skills.builder()
+    .skills(mySkills)
+    .activateSkillToolConfig(ActivateSkillToolConfig.builder()
+        .name("load_skill")                          // 工具名(默认 activate_skill)
+        .description("Load a skill's full instructions")
+        .parameterName("skill")                      // 参数名(默认 skill_name)
+        .parameterDescription("The skill to load")
+        .throwToolArgumentsExceptions(true)          // 抛 ToolArgumentsException
+        .build())
+    .readResourceToolConfig(ReadResourceToolConfig.builder()
+        .name("read_resource")
+        .description("Read a skill's resource file")
+        .skillNameParameterName("skill")
+        .skillNameParameterDescription("The skill name")
+        .relativePathParameterName("path")
+        .relativePathParameterDescription("Resource path")
+        // .relativePathParameterDescriptionProvider(...) // 动态描述
+        .throwToolArgumentsExceptions(true)
+        .build())
+    .build();</code></pre>
+
+<p><strong>何时改</strong>:模型训练数据里 "activate_skill" 这个词出现得少 / 你的 system prompt 已经用了同名工具 / 想给 LLM 更明确的语义提示。</p>
+
+<h2>7. 模式 2:Shell 模式(实验性,慎用)</h2>
+
+<p>对应 <a href="https://agentskills.io/">Agent Skills 规范</a>中"基于文件系统的代理集成方法"。<strong>LLM 自己跑 shell 命令读 <code>SKILL.md</code></strong>,类似人类开发者浏览技能文件。</p>
+
+<div class="callout-warn">
+<strong>⚠️ 警告</strong>:Shell 执行<strong>本质上不安全</strong>。命令直接在<strong>宿主进程环境</strong>中运行,<strong>没有沙箱、没有容器化、没有权限限制</strong>。恶意/被 prompt 注入的 LLM 可以在跑应用的机器上执行<strong>任意命令</strong>。<strong>仅在完全信任输入并接受相关风险的受控环境中使用</strong>(如本地原型)。
+</div>
+
+<h3>7.1 工作原理</h3>
+
+<ol>
+  <li>System message 列出可用技能 + <strong>绝对文件系统路径</strong>(<code>&lt;location&gt;</code> 字段)</li>
+  <li>用户问匹配某技能 → LLM 跑 <code>cat /path/to/skills/docx/SKILL.md</code> 读指令</li>
+  <li>LLM 按指令跑进一步的 shell 命令(读资源 / 跑脚本)</li>
+  <li>只有 1 个工具:<code>run_shell_command</code>(替代 <code>activate_skill</code> + <code>read_skill_resource</code>)</li>
+</ol>
+
+<h3>7.2 依赖 + 接线</h3>
+
+<pre><code>&lt;!-- pom.xml --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;dev.langchain4j&lt;/groupId&gt;
+    &lt;artifactId&gt;langchain4j-experimental-skills-shell&lt;/artifactId&gt;
+    &lt;version&gt;1.11.8-beta19&lt;/version&gt;
+&lt;/dependency&gt;</code></pre>
+
+<pre><code>// 注意:用 ShellSkills 而不是 Skills
+ShellSkills skills = ShellSkills.from(
+    FileSystemSkillLoader.loadSkills(Path.of("skills/"))
+);
+
+MyAiService service = AiServices.builder(MyAiService.class)
+    .chatModel(chatModel)
+    .toolProvider(skills.toolProvider())
+    .systemMessage("You have access to the following skills:\n"
+        + skills.formatAvailableSkills()
+        + "\nWhen the user's request relates to one of these skills, "
+        + "read its SKILL.md before proceeding.")
+    .build();</code></pre>
+
+<p><code>formatAvailableSkills()</code> 输出多了 <code>&lt;location&gt;</code> 字段:</p>
+
+<pre><code>&lt;available_skills&gt;
+  &lt;skill&gt;
+    &lt;name&gt;docx&lt;/name&gt;
+    &lt;description&gt;Edit and review Word documents using tracked changes&lt;/description&gt;
+    &lt;location&gt;/path/to/skills/docx/SKILL.md&lt;/location&gt;
+  &lt;/skill&gt;
+&lt;/available_skills&gt;</code></pre>
+
+<h3>7.3 定制 Shell 工具</h3>
+
+<pre><code>ShellSkills skills = ShellSkills.builder()
+    .skills(mySkills)
+    .runShellCommandToolConfig(RunShellCommandToolConfig.builder()
+        .name("run_shell_command")
+        .description("Execute a shell command")   // 默认含 OS 名
+        .commandParameterName("cmd")              // 默认 command
+        .commandParameterDescription("Shell command to run")
+        .timeoutSecondsParameterName("timeout")   // 默认 timeout_seconds
+        .workingDirectory(Path.of("/tmp/work"))   // 默认 user.dir
+        .maxStdOutChars(20_000)                   // 默认 10_000
+        .maxStdErrChars(20_000)
+        .executorService(myExec)                  // 自定义执行器
+        .throwToolArgumentsExceptions(true)
+        .build())
+    .build();</code></pre>
+
+<h3>7.4 何时用 Shell 模式</h3>
+
+<ul>
+  <li>✅ <strong>本地原型 / 实验</strong>(快速搭可用的工作流)</li>
+  <li>✅ <strong>用社区发布的第三方技能</strong>(agentskills.io 生态)而<strong>不移植 Java</strong></li>
+  <li>✅ <strong>完全控制的环境</strong>(本地机器 / 受控 dev 环境)</li>
+  <li>❌ <strong>生产环境</strong>(任意命令执行风险)</li>
+  <li>❌ <strong>多用户 SaaS</strong>(一个用户 prompt 注入能影响整个服务器)</li>
+</ul>
+
+<p><strong>推荐路径</strong>:用 Shell 模式快速验证流程 → 方案成熟后,把"操作"逐步迁移到 Java 工具(类型安全 + 可测试),切到工具模式。</p>
+
+<h2>8. 工具模式 vs Shell 模式 决策</h2>
+
+<table>
+<thead><tr><th>维度</th><th>工具模式(推荐)</th><th>Shell 模式(实验性)</th></tr></thead>
+<tbody>
+<tr><td><strong>模块</strong></td><td><code>langchain4j-skills</code></td><td><code>langchain4j-experimental-skills-shell</code></td></tr>
+<tr><td><strong>技能访问</strong></td><td>Java 预加载到内存,LLM 看不到文件系统</td><td>LLM 自己跑 <code>cat</code> 读文件</td></tr>
+<tr><td><strong>工具</strong></td><td><code>activate_skill</code> + <code>read_skill_resource</code> + 你的工具</td><td>只有 <code>run_shell_command</code></td></tr>
+<tr><td><strong>安全性</strong></td><td>✅ 安全(只调你注册的 Java 工具)</td><td>❌ 不安全(任意命令)</td></tr>
+<tr><td><strong>技能来源</strong></td><td>文件系统 / 类路径 / 编程式</td><td><strong>必须</strong>文件系统</td></tr>
+<tr><td><strong>性能</strong></td><td>快(预加载,无 IO)</td><td>慢(每次 cat 一次)</td></tr>
+<tr><td><strong>适用</strong></td><td>99% 场景 / 生产</td><td>本地原型 / 调第三方技能</td></tr>
+<tr><td><strong>技能范围工具</strong></td><td>✅ 支持</td><td>❌ 不支持</td></tr>
+</tbody>
+</table>
+
+<h2>9. 决策树(怎么搭?)</h2>
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 580" style="max-width:100%;height:auto;background:#0f172a;border-radius:12px;padding:20px;">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+  </defs>
+
+  <text x="450" y="30" text-anchor="middle" fill="#f1f5f9" font-size="20" font-weight="bold">
+    Skills 选型决策树
+  </text>
+
+  <rect x="350" y="60" width="200" height="50" rx="8" fill="url(#g1)"/>
+  <text x="450" y="92" text-anchor="middle" fill="white" font-size="15" font-weight="bold">System prompt 长度?</text>
+
+  <line x1="450" y1="110" x2="450" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="200" y1="140" x2="700" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="150" y1="140" x2="150" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="140" x2="450" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="140" x2="750" y2="170" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="30" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <text x="150" y="195" text-anchor="middle" fill="#10b981" font-size="13" font-weight="bold">&lt; 500 字 / 单一场景</text>
+  <text x="150" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">直接写 system prompt</text>
+
+  <rect x="330" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#06b6d4" stroke-width="2"/>
+  <text x="450" y="195" text-anchor="middle" fill="#06b6d4" font-size="13" font-weight="bold">2-10 个场景</text>
+  <text x="450" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">用 Skills 拆 工具模式</text>
+
+  <rect x="630" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#a855f7" stroke-width="2"/>
+  <text x="750" y="195" text-anchor="middle" fill="#a855f7" font-size="13" font-weight="bold">&gt; 10 个场景 / 频繁加</text>
+  <text x="750" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">Skills + 文件系统 + 技能范围工具</text>
+
+  <line x1="150" y1="230" x2="150" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="230" x2="450" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="230" x2="750" y2="260" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="50" y="260" width="200" height="70" rx="6" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="150" y="285" text-anchor="middle" fill="#10b981" font-size="12" font-weight="bold">零成本</text>
+  <text x="150" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">ChatModel.builder()</text>
+  <text x="150" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">.systemMessage(...)</text>
+  <text x="150" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">即可</text>
+
+  <rect x="350" y="260" width="200" height="70" rx="6" fill="#0f172a" stroke="#06b6d4" stroke-width="1"/>
+  <text x="350" y="285" text-anchor="middle" fill="#06b6d4" font-size="12" font-weight="bold">中等成本</text>
+  <text x="350" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">拆 SKILL.md +</text>
+  <text x="350" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">FileSystemSkillLoader</text>
+  <text x="350" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">+ toolProvider</text>
+
+  <rect x="650" y="260" width="200" height="70" rx="6" fill="#0f172a" stroke="#a855f7" stroke-width="1"/>
+  <text x="650" y="285" text-anchor="middle" fill="#a855f7" font-size="12" font-weight="bold">高成本</text>
+  <text x="650" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">全模式:技能 + 资源</text>
+  <text x="650" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">+ 技能范围工具</text>
+  <text x="650" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">+ 文件系统工作流</text>
+
+  <rect x="50" y="380" width="800" height="80" rx="8" fill="url(#g2)"/>
+  <text x="450" y="410" text-anchor="middle" fill="white" font-size="14" font-weight="bold">3 步落地路径</text>
+  <text x="450" y="435" text-anchor="middle" fill="white" font-size="12">1️⃣ 识别"长 system prompt 重复出现的主题" → 2️⃣ 每个主题拆一个 SKILL.md → 3️⃣ 加载到 toolProvider,system message 只放目录</text>
+  <text x="450" y="453" text-anchor="middle" fill="white" font-size="12">Shell 模式只用于本地原型 / 调第三方技能;生产 100% 用工具模式</text>
+
+  <rect x="50" y="490" width="800" height="70" rx="6" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
+  <text x="450" y="515" text-anchor="middle" fill="#f1f5f9" font-size="13" font-weight="bold">3 个核心 API</text>
+  <text x="450" y="535" text-anchor="middle" fill="#cbd5e1" font-size="11">Skill.builder() — 编程式构造 / FileSystemSkillLoader.loadSkills() — 文件系统 / Skills.from() + .toolProvider() — 接入 AI Service</text>
+  <text x="450" y="552" text-anchor="middle" fill="#cbd5e1" font-size="11">2 个自动工具:activate_skill(总是注册)+ read_skill_resource(有资源时注册)</text>
+</svg>
+
+<h2>10. 5 个避坑</h2>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 1:Shell 模式上生产</strong><br>
+<strong>症状</strong>:本地原型调通了,直接发到生产,被 prompt 注入的 LLM 跑了 <code>rm -rf /</code>。<br>
+<strong>根因</strong>:Shell 模式<strong>没有沙箱</strong>,命令直接在宿主进程跑,权限跟启动 Java 进程的用户一样。<br>
+<strong>修法</strong>:<strong>生产 100% 用工具模式</strong>;Shell 模式只用于本地原型 / 调第三方社区技能。方案成熟后,把 shell 命令逐步迁移到 Java 工具(类型安全 + 可测试)。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 2:技能 description 写得太短 / 太长</strong><br>
+<strong>症状</strong>:description 只有 "Processes orders"(太短,LLM 不知道何时调);description 写了 200 字调用步骤(太长,挤占目录,LLM 不读)。<br>
+<strong>根因</strong>:description 是"LLM 选技能的依据",应该简短 + <strong>说明何时调</strong>。<br>
+<strong>修法</strong>:
+<ul>
+  <li>✅ <code>"Processes a customer order end-to-end (validate → reserve → charge → confirm)"</code>(10-30 字,带场景)</li>
+  <li>❌ <code>"Processes"</code>(太短,场景不清)</li>
+  <li>❌ <code>"1. validate order... 2. reserve... 3. charge..."</code>(太详细,挤)</li>
+</ul>
+详细步骤放 <code>content</code>(激活后才注入),不放 <code>description</code>(目录里一直显示)。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 3:忘记调 formatAvailableSkills()</strong><br>
+<strong>症状</strong>:加载了技能,LLM 不知道有这些技能,从不调 <code>activate_skill</code>。<br>
+<strong>根因</strong>:技能是<strong>按需加载</strong>,LLM 初始上下文里<strong>只有目录</strong>。目录不注入 → LLM 瞎。<br>
+<strong>修法</strong>:<code>systemMessage("..." + skills.formatAvailableSkills() + "...")</code>,把 XML 目录拼到 system prompt。LangChain4j <strong>不会自动</strong>帮你做。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 4:技能范围工具 + 工具搜索 配合错</strong><br>
+<strong>症状</strong>:配置了工具搜索,技能激活了但 LLM 找不到 <code>validateOrder</code>(技能范围工具)。<br>
+<strong>根因</strong>:<strong>技能范围工具不参与工具搜索</strong>(<code>tool_search_tool</code> 找不到它们),只能通过 <code>activate_skill</code> 显式激活。<br>
+<strong>修法</strong>:
+<ul>
+  <li>技能范围工具:<strong>先 <code>activate_skill</code>,再用技能范围工具</strong></li>
+  <li>常规工具(<code>.tools(...)</code>):可搜索</li>
+  <li>混合场景:技能范围工具 + 常规工具各管一段,LLM 自己协调</li>
+</ul>
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 5:实验性 API 当稳定 API 用 + Agent Skills 规范漂移</strong><br>
+<strong>症状</strong>:升级 LangChain4j 1.x → 2.x,<code>Skill.builder()</code> 改名 / <code>formatAvailableSkills()</code> 输出格式变了;agentskills.io 规范新版本要求 <code>SKILL.md</code> 加 <code>version</code> 字段。<br>
+<strong>根因</strong>:Skills 明确"实验性 API";Agent Skills 规范也还在演进(类似 MCP 早期)。<br>
+<strong>修法</strong>:
+<ul>
+  <li>技能代码独立 <code>skills/</code> 包,升级只改这个包</li>
+  <li>大版本升级前看 release notes 的 Skills 章节</li>
+  <li>SKILL.md 写法留 <strong>兼容余地</strong>(description 不要依赖特定词,LLM 才能鲁棒匹配)</li>
+  <li>关键流程在 <code>content</code> 里写<strong>容错</strong>(如 "If X fails, do Y")</li>
+</ul>
+</div>
+
+<h2>11. 速查表</h2>
+
+<table>
+<thead><tr><th>项</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><strong>核心接口</strong></td><td><code>dev.langchain4j.skills.Skill</code></td></tr>
+<tr><td><strong>构建器</strong></td><td><code>Skill.builder()</code> — name / description / content / resources / tools / toolProviders</td></tr>
+<tr><td><strong>文件系统加载</strong></td><td><code>FileSystemSkillLoader.loadSkills(Path.of("skills/"))</code></td></tr>
+<tr><td><strong>类路径加载</strong></td><td><code>ClassPathSkillLoader.loadSkills("skills")</code></td></tr>
+<tr><td><strong>模块(工具模式)</strong></td><td><code>dev.langchain4j:langchain4j-skills</code></td></tr>
+<tr><td><strong>模块(Shell 模式)</strong></td><td><code>dev.langchain4j:langchain4j-experimental-skills-shell</code></td></tr>
+<tr><td><strong>包(工具模式)</strong></td><td><code>dev.langchain4j.skills</code>(<code>Skills</code> / <code>FileSystemSkillLoader</code> / <code>SkillResource</code>)</td></tr>
+<tr><td><strong>包(Shell 模式)</strong></td><td><code>dev.langchain4j.skills.shell</code>(<code>ShellSkills</code> / <code>RunShellCommandToolConfig</code>)</td></tr>
+<tr><td><strong>注入 AI Service</strong></td><td><code>.toolProvider(skills.toolProvider())</code></td></tr>
+<tr><td><strong>目录注入</strong></td><td><code>systemMessage(... + skills.formatAvailableSkills() + ...)</code></td></tr>
+<tr><td><strong>自动工具 1</strong></td><td><code>activate_skill</code>(总是注册,参数 <code>skill_name</code>)</td></tr>
+<tr><td><strong>自动工具 2</strong></td><td><code>read_skill_resource</code>(有资源时注册,参数 <code>skill_name</code> + <code>relative_path</code>)</td></tr>
+<tr><td><strong>Shell 模式工具</strong></td><td><code>run_shell_command</code>(参数 <code>command</code> + <code>timeout_seconds</code>)</td></tr>
+<tr><td><strong>技能范围工具挂载</strong></td><td><code>Skill.builder().tools(new XxxTools())</code> / <code>.tools(Map)</code> / <code>.toolProviders(McpToolProvider)</code></td></tr>
+<tr><td><strong>技能范围工具可见时机</strong></td><td><code>activate_skill</code> 之后,sticky 到后续 AI Service 调用</td></tr>
+<tr><td><strong>SKILL.md 必填</strong></td><td>YAML 前置 <code>name</code> + <code>description</code></td></tr>
+<tr><td><strong>自动加载资源</strong></td><td>技能目录下除 <code>SKILL.md</code> 和 <code>scripts/</code> 外所有文件</td></tr>
+<tr><td><strong>资源 API</strong></td><td><code>SkillResource.builder().relativePath(...).content(...).build()</code></td></tr>
+<tr><td><strong>定制工具</strong></td><td><code>ActivateSkillToolConfig</code> / <code>ReadResourceToolConfig</code> / <code>RunShellCommandToolConfig</code></td></tr>
+<tr><td><strong>工具搜索协作</strong></td><td>技能范围工具<strong>不</strong>参与搜索;<code>activate_skill</code> <code>ALWAYS_VISIBLE</code></td></tr>
+<tr><td><strong>兼容性</strong></td><td>符合 <a href="https://agentskills.io/">Agent Skills 规范</a></td></tr>
+<tr><td><strong>稳定性</strong></td><td>⚠️ 实验性 API + Agent Skills 规范在演进</td></tr>
+</tbody>
+</table>
+
+<h2>12. 高级篇收官小结</h2>
+
+<p><strong>LangChain4j 19 章 1 张图</strong>(基础 9 + 高级 10):</p>
+
+<table>
+<thead><tr><th>篇</th><th>章</th><th>主题</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td><strong>基础</strong></td><td>ch01-09</td><td>Chat / Memory / Parameters / Streaming / AI Services / Tools / Output / Classify / Image</td><td>✅</td></tr>
+<tr><td><strong>高级</strong></td><td>ch10-13</td><td>Spring Boot / HTTP / Logging / JSON Codec(企业入门 + 小工具)</td><td>✅</td></tr>
+<tr><td><strong>高级</strong></td><td>ch14-16</td><td>RAG / Agents / MCP(企业核心 + 范式)</td><td>✅</td></tr>
+<tr><td><strong>高级</strong></td><td>ch17-19</td><td>Guardrails / Observability / Skills(收官 · 实验性)</td><td>✅</td></tr>
+</tbody>
+</table>
+
+<blockquote class="mihuang">
+  <strong>🎉 高级篇收官</strong>:19 章覆盖 LangChain4j 全部核心特性 + 主流集成。<strong>下一阶段</strong>:可考虑做 <strong>实战项目</strong>(用 19 章学的所有特性搭一个完整的 AI 应用,比如跨境电商选品助手 / 智能客服 / 知识库问答),或开 <strong>langGraph4j(图工作流)</strong> 教程。
+</blockquote>
+
+</main>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

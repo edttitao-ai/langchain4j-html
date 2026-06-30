@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lg03 · 并行分支 · LangGraph4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">03</span> 并行分支(fan-out / fan-in + 并发执行)</h1>
+    <p class="hero-sub">addParallelNodeExecutor · ForkJoinPool · 3 大限制 · 3 案例 · 多 LLM/检索/工具并发 6 场景</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<strong>并行节点 = 多个下游节点同时跑</strong>(fan-out → fan-in)。LangGraph4j 的并发由<strong>图管理</strong>(不是节点自己并发),通过 <code>RunnableConfig.addParallelNodeExecutor("nodeId", Executor)</code> 指定<strong>哪个节点的下游要并发</strong>。默认顺序执行,<strong>必须显式配 Executor 才并发</strong>。</p>
+
+<p><strong>核心价值</strong>:多 LLM 并行评审 / 多 retriever 并行查 / 多工具并发调用 / 多 Agent 协作 —— 节省 wall-clock 时间(不是 CPU,就是让总耗时 = 最慢的那个,而不是 sum)。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"咱们的 RAG 查询是串行的 —— 先用关键词检索 → 再用向量检索 → 再用 reranker,3 步加起来 1.2 秒。怎么降到 0.4 秒?"</p>
+
+<p><strong>解法</strong>:3 个检索器<strong>并行跑</strong>(fan-out) → 等全部回来 → 进入 reranker(fan-in)。用 LangGraph4j 并行节点:<strong>1 个 root 节点 + 3 个并行子任务</strong>。wall-clock 从 1.2s 降到 ~0.4s(3 路并发,瓶颈是最慢那个)。</p>
+
+<h3>6 个并行分支能解决的事</h3>
+<ul>
+  <li><strong>🔀 多 RAG 检索器并发</strong> — 关键词 + 向量 + 知识图谱同时查,1.2s → 0.4s</li>
+  <li><strong>🤖 多 LLM 并行评审</strong> — 3 个不同模型(GPT-4 / Claude / Gemini)对同一 prompt 投票,综合答案</li>
+  <li><strong>🛠️ 多工具并发调用</strong> — "查订单"+"查库存"+"查物流"3 工具并发,3s → 1.2s</li>
+  <li><strong>👥 多 Agent 协作</strong> — 多个 Agent 子图并行跑(对应 lg02 子图),最后汇总</li>
+  <li><strong>🔍 多 Moderation 审查</strong> — 内容审核 / 涉政 / 涉黄 / 暴力 4 路并发审查,1 路失败不影响其他</li>
+  <li><strong>🌐 多语言翻译并发</strong> — 同一文档并发翻成 5 国语言(5 个翻译 API 同时调),5s → 1.5s</li>
+</ul>
+
+<p><strong>💡 什么时候不需要</strong>:单步 / 单工具 / 步骤间有强依赖 / 总耗时 < 100ms —— 并发反而增加复杂度。并发是"多个独立任务 + 节省 wall-clock"的优化方案。</p>
+
+<blockquote class="mihuang">
+  <strong>口诀</strong>:<strong>并发是"图管的",不是"节点自己"</strong>。用 <code>addParallelNodeExecutor("A", ForkJoinPool)</code> 告诉图"A 的下游要并发"。⚠️ <strong>必须配 Executor 才并发</strong>(否则顺序),<strong>必须传 runnableConfig</strong>(否则顺序)。3 大限制:叉接 / 单步 / 无条件边。
+</blockquote>
+
+<h2>2. 3 大限制(必读!)</h2>
+
+<p>LangGraph4j 并行节点<strong>有严格限制</strong>,设计为<strong>单层 fork-join 模式</strong>:</p>
+
+<table>
+<thead><tr><th>限制</th><th>说明</th><th>示意</th></tr></thead>
+<tbody>
+<tr><td><strong>① 只能叉接</strong></td><td>1 个 root → N 个并行分支(不允许多层嵌套并发)</td><td>A → [A1, A2, A3] ✅</td></tr>
+<tr><td><strong>② 只允许 1 个并行步骤</strong></td><td>1 张图只能有<strong>1 个</strong> fork 点(不能有 2 个并行的 fork)</td><td>A → [A1, A2, A3] → A4 ❌(A4 是新 fork)</td></tr>
+<tr><td><strong>③ 不允许条件边</strong></td><td>并行分支的根节点<strong>不能用条件边</strong>(避免复杂的并发路由)</td><td><code>addConditionalEdges("A", ...)</code> ❌</td></tr>
+</tbody>
+</table>
+
+<h3>2.1 为什么这么严?</h3>
+
+<p>LangGraph4j 当前的并行实现是"轻量 fork-join":</p>
+<ul>
+  <li><strong>易实现</strong>:1 个根 + N 个子节点 + 1 个 join,模型简单</li>
+  <li><strong>易推理</strong>:图的状态可预测</li>
+  <li><strong>够用</strong>:90% 并行需求都是这个模式</li>
+</ul>
+
+<p><strong>多步并行 / 嵌套并行怎么办</strong>?用 <strong>子图</strong>(lg02) —— 把多层并行包成子图,在父图里<strong>作为 1 个节点</strong>(用子图内部的多步并行)。</p>
+
+<h2>3. 基础:定义并行节点</h2>
+
+<p>核心是<strong>3 步</strong>:</p>
+<ol>
+  <li>建图:<strong>多个节点关联到同一条边</strong> → 自动形成 fork</li>
+  <li>配 Executor:<code>addParallelNodeExecutor("A", ForkJoinPool.commonPool())</code></li>
+  <li>执行:<strong>必须传 runnableConfig</strong>(Executor 在 config 里)</li>
+</ol>
+
+<h3>3.1 Hello World 并行</h3>
+
+<pre><code>import java.util.concurrent.ForkJoinPool;
+import static org.bsc.langgraph4j.StateGraph.*;
+
+var workflow = new MessagesStateGraph&lt;String&gt;()
+    .addNode("A",  makeNode("A"))   // 根
+    .addNode("A1", makeNode("A1"))  // 并行分支 1
+    .addNode("A2", makeNode("A2"))  // 并行分支 2
+    .addNode("A3", makeNode("A3"))  // 并行分支 3
+    .addNode("B",  makeNode("B"))   // join
+    .addNode("C",  makeNode("C"))   // join 之后
+
+    // ← fork:A 完后 A1/A2/A3 同时跑
+    .addEdge("A", "A1")
+    .addEdge("A", "A2")
+    .addEdge("A", "A3")
+    // ← join:全部回来才进 B
+    .addEdge("A1", "B")
+    .addEdge("A2", "B")
+    .addEdge("A3", "B")
+    .addEdge("B", "C")
+    .addEdge(START, "A")
+    .addEdge("C", END)
+    .compile();
+
+// ⚠️ 关键:配 Executor + 传 runnableConfig
+var runnableConfig = RunnableConfig.builder()
+    .addParallelNodeExecutor("A", ForkJoinPool.commonPool())  // A 的下游并发
+    .build();
+
+var result = workflow.stream(Map.of(), runnableConfig)
+    .stream()
+    .peek(System.out::println)
+    .reduce((a, b) -&gt; b)
+    .map(NodeOutput::state);</code></pre>
+
+<p><strong>行为</strong>:A 跑完 → A1/A2/A3 <strong>同时</strong>在 <code>ForkJoinPool.commonPool()</code> 跑 → 全部回来 → 进 B → 进 C → END。</p>
+
+<div class="callout-warn">
+<strong>⚠️ 关键 2 点</strong>:
+<ul>
+  <li><strong>必须配 Executor</strong> —— 没配 = <strong>顺序执行</strong>(A → A1 → A2 → A3 → B,不是并发的)</li>
+  <li><strong>必须传 runnableConfig</strong> —— Executor 存在 config 里,workflow.stream() 不传 config = 用默认顺序</li>
+</ul>
+</div>
+
+<h2>4. join 后用条件边(回环)</h2>
+
+<p>并行分支完成后,可以<strong>从 join 节点出发</strong>用条件边回环(到并行分支里的某个节点):</p>
+
+<pre><code>var workflow = new MessagesStateGraph&lt;String&gt;()
+    .addNode("A",  makeNode("A"))
+    .addNode("A1", makeNode("A1"))
+    .addNode("A2", makeNode("A2"))
+    .addNode("A3", makeNode("A3"))
+    .addNode("B",  makeNode("B"))
+    .addNode("C",  makeNode("C"))
+    .addEdge("A", "A1")
+    .addEdge("A", "A2")
+    .addEdge("A", "A3")
+    .addEdge("A1", "B")
+    .addEdge("A2", "B")
+    .addEdge("A3", "B")
+    // .addEdge("B", "C")  // 注释掉直连,改条件
+    .addConditionalEdges("B",
+        edge_async(state -&gt; state.lastMinus(1)
+            .filter(m -&gt; Objects.equals(m, "A3"))
+            .map(m -&gt; "continue")
+            .orElse("back")),
+        EdgeMappings.builder()
+            .to("A1", "back")      // 回环到 A1
+            .to("C", "continue")
+            .build())
+    .addEdge(START, "A")
+    .addEdge("C", END)
+    .compile();</code></pre>
+
+<p><strong>注意</strong>:条件边<strong>从 B 出发</strong>(不是从 A 出发)是允许的 —— 只有"并行根节点"才禁止条件边。</p>
+
+<h2>5. 用子图当并行分支(突破单步限制)</h2>
+
+<p><strong>问题</strong>:每条并行分支只能有 1 个节点,需要多步怎么办?—— <strong>用子图</strong>(把多步封装在子图里)。</p>
+
+<h3>5.1 混合:节点 + 子图</h3>
+
+<pre><code>// A1 / A3 是子图(可多步),A2 是单节点
+var subgraphA1 = new MessagesStateGraph&lt;String&gt;()
+    .addNode("A1.1", makeNode("A1.1"))
+    .addNode("A1.2", makeNode("A1.2"))
+    .addEdge(START, "A1.1")
+    .addEdge("A1.1", "A1.2")
+    .addEdge("A1.2", END)
+    .compile();
+
+var subgraphA3 = new MessagesStateGraph&lt;String&gt;()
+    .addNode("A3.1", makeNode("A3.1"))
+    .addNode("A3.2", makeNode("A3.2"))
+    .addEdge(START, "A3.1")
+    .addEdge("A3.1", "A3.2")
+    .addEdge("A3.2", END)
+    .compile();
+
+var workflow = new MessagesStateGraph&lt;String&gt;()
+    .addNode("A",  makeNode("A"))
+    .addNode("A1", subgraphA1)              // ← 子图
+    .addNode("A2", makeNode("A2"))
+    .addNode("A3", subgraphA3)              // ← 子图
+    .addNode("B",  makeNode("B"))
+    .addEdge("A", "A1")
+    .addEdge("A", "A2")
+    .addEdge("A", "A3")
+    .addEdge("A1", "B")
+    .addEdge("A2", "B")
+    .addEdge("A3", "B")
+    .addEdge(START, "A")
+    .addEdge("B", END)
+    .compile();
+
+// A 的下游(A1 子图 / A2 节点 / A3 子图)都并发
+workflow.stream(Map.of(),
+    RunnableConfig.builder()
+        .addParallelNodeExecutor("A", ForkJoinPool.commonPool())
+        .build());</code></pre>
+
+<h3>5.2 全子图:每条分支都是子图</h3>
+
+<p>最干净的并行模式:<strong>3 个独立子图并发</strong>(子图 = 独立模块,见 lg02)。</p>
+
+<pre><code>var subgraphA1 = new MessagesStateGraph&lt;String&gt;()
+    .addNode("A1.1", makeNode("A1.1"))
+    .addNode("A1.2", makeNode("A1.2"))
+    .addEdge(START, "A1.1")
+    .addEdge("A1.1", "A1.2")
+    .addEdge("A1.2", END)
+    .compile();
+
+var subgraphA2 = new MessagesStateGraph&lt;String&gt;()  // A2 同样结构
+    .addNode("A2.1", makeNode("A2.1"))
+    .addNode("A2.2", makeNode("A2.2"))
+    .addEdge(START, "A2.1")
+    .addEdge("A2.1", "A2.2")
+    .addEdge("A2.2", END)
+    .compile();
+
+var subgraphA3 = new MessagesStateGraph&lt;String&gt;()  // A3 同样结构
+    .addNode("A3.1", makeNode("A3.1"))
+    .addNode("A3.2", makeNode("A3.2"))
+    .addEdge(START, "A3.1")
+    .addEdge("A3.1", "A3.2")
+    .addEdge("A3.2", END)
+    .compile();
+
+var workflow = new MessagesStateGraph&lt;String&gt;()
+    .addNode("A",  makeNode("A"))
+    .addNode("A1", subgraphA1)
+    .addNode("A2", subgraphA2)
+    .addNode("A3", subgraphA3)
+    .addNode("B",  makeNode("B"))
+    .addEdge("A", "A1")
+    .addEdge("A", "A2")
+    .addEdge("A", "A3")
+    .addEdge("A1", "B")
+    .addEdge("A2", "B")
+    .addEdge("A3", "B")
+    .addEdge(START, "A")
+    .addEdge("B", END)
+    .compile();</code></pre>
+
+<p><strong>好处</strong>:3 个子图独立开发(对应 lg02)、独立测试、独立部署;父图只管并发协调。</p>
+
+<h2>6. 实战:多 RAG 检索器并发</h2>
+
+<p>经典场景 —— 关键词 / 向量 / 知识图谱 3 个 retriever 并发查,rerank 后输出:</p>
+
+<pre><code>// === 3 个 retriever 子图 ===
+// 关键词检索
+var keywordSubgraph = new StateGraph(KeywordState.SCHEMA, KeywordState::new)
+    .addNode("search_elastic", node_async(state -&gt; {
+        // 调 ES / OpenSearch 关键词查询
+        return Map.of("keywordResults", doElasticSearch(state));
+    }))
+    .addNode("format_hits", node_async(state -&gt;
+        Map.of("keywordResults", formatHits(state.value("keywordResults").orElse(List.of())))))
+    .addEdge(START, "search_elastic")
+    .addEdge("search_elastic", "format_hits")
+    .addEdge("format_hits", END)
+    .compile();
+
+// 向量检索
+var vectorSubgraph = new StateGraph(VectorState.SCHEMA, VectorState::new)
+    .addNode("embed_query", node_async(state -&gt; {
+        var emb = embeddingModel.embed(state.value("query").orElse("")).content();
+        return Map.of("queryEmbedding", emb);
+    }))
+    .addNode("search_pgvector", node_async(state -&gt; {
+        // 调 pgvector 余弦相似度
+        return Map.of("vectorResults", doVectorSearch(state));
+    }))
+    .addEdge(START, "embed_query")
+    .addEdge("embed_query", "search_pgvector")
+    .addEdge("search_pgvector", END)
+    .compile();
+
+// 知识图谱检索
+var graphSubgraph = new StateGraph(GraphState.SCHEMA, GraphState::new)
+    .addNode("extract_entities", node_async(state -&gt; {
+        // NER 提取实体
+        return Map.of("entities", extractEntities(state));
+    }))
+    .addNode("query_neo4j", node_async(state -&gt; {
+        // Neo4j Cypher 查询
+        return Map.of("graphResults", doNeo4jQuery(state));
+    }))
+    .addEdge(START, "extract_entities")
+    .addEdge("extract_entities", "query_neo4j")
+    .addEdge("query_neo4j", END)
+    .compile();
+
+// === 主图:3 路并发 → rerank ===
+var ragWorkflow = new StateGraph(RagState.SCHEMA, RagState::new)
+    .addNode("parse_query",  node_async(state -&gt; Map.of("query", state.value("userQuery").orElse(""))))
+    .addNode("keyword",      keywordSubgraph)     // 子图 1
+    .addNode("vector",       vectorSubgraph)       // 子图 2
+    .addNode("graph",        graphSubgraph)        // 子图 3
+    .addNode("rerank",       node_async(state -&gt; {
+        // 合并 3 路结果,rerank,取 top-5
+        var all = merge3Results(
+            state.value("keywordResults").orElse(List.of()),
+            state.value("vectorResults").orElse(List.of()),
+            state.value("graphResults").orElse(List.of())
+        );
+        return Map.of("topDocs", rerank(all, 5));
+    }))
+    .addNode("llm_generate", node_async(state -&gt;
+        Map.of("answer", llm.chat(formatContext(state.value("topDocs").orElse(List.of())),
+                                    state.value("query").orElse("")))))
+
+    .addEdge(START, "parse_query")
+    .addEdge("parse_query", "keyword")
+    .addEdge("parse_query", "vector")
+    .addEdge("parse_query", "graph")
+    .addEdge("keyword",      "rerank")
+    .addEdge("vector",       "rerank")
+    .addEdge("graph",        "rerank")
+    .addEdge("rerank",       "llm_generate")
+    .addEdge("llm_generate", END)
+    .compile();
+
+// 跑(parse_query 的下游并发)
+var config = RunnableConfig.builder()
+    .addParallelNodeExecutor("parse_query", ForkJoinPool.commonPool())
+    .build();
+
+var result = ragWorkflow.stream(Map.of("userQuery", "LangGraph4j 怎么用?"), config);</code></pre>
+
+<p><strong>性能</strong>:</p>
+<ul>
+  <li>顺序:parse_query(0.1s) + 关键词(0.4s) + 向量(0.5s) + 图谱(0.3s) + rerank(0.2s) + LLM(1s) = <strong>2.5s</strong></li>
+  <li>并行:parse_query(0.1s) + max(关键词 0.4, 向量 0.5, 图谱 0.3)(0.5s) + rerank(0.2s) + LLM(1s) = <strong>1.8s</strong>(节省 0.7s)</li>
+  <li>3 路全并发瓶颈在 LLM,优化到 LLM 内部流式(对应 lg04)</li>
+</ul>
+
+<h2>7. 实战:多 LLM 投票</h2>
+
+<pre><code>// 3 个 LLM 并行评审同一 prompt
+var gptVote = new MessagesStateGraph&lt;String&gt;()
+    .addNode("call_gpt", node_async(state -&gt; {
+        String prompt = (String) state.value("prompt").orElse("");
+        String ans = openAiChatModel.chat(prompt);
+        return Map.of("gptAnswer", ans);
+    }))
+    .addEdge(START, "call_gpt")
+    .addEdge("call_gpt", END)
+    .compile();
+
+var claudeVote = new MessagesStateGraph&lt;String&gt;()  // 同样结构,调 Claude
+    .addNode("call_claude", node_async(state -&gt; {
+        String prompt = (String) state.value("prompt").orElse("");
+        String ans = anthropicChatModel.chat(prompt);
+        return Map.of("claudeAnswer", ans);
+    }))
+    .addEdge(START, "call_claude")
+    .addEdge("call_claude", END)
+    .compile();
+
+var geminiVote = new MessagesStateGraph&lt;String&gt;()  // 同样结构,调 Gemini
+    .addNode("call_gemini", node_async(state -&gt;
+        Map.of("geminiAnswer", geminiChatModel.chat((String) state.value("prompt").orElse("")))))
+    .addEdge(START, "call_gemini")
+    .addEdge("call_gemini", END)
+    .compile();
+
+var voteWorkflow = new StateGraph(VoteState.SCHEMA, VoteState::new)
+    .addNode("dispatch", node_async(state -&gt; Map.of("prompt", state.value("question").orElse(""))))
+    .addNode("gpt",    gptVote)
+    .addNode("claude", claudeVote)
+    .addNode("gemini", geminiVote)
+    .addNode("vote", node_async(state -&gt; {
+        // 多数投票 / 加权
+        var winner = majorityVote(
+            state.value("gptAnswer").orElse(""),
+            state.value("claudeAnswer").orElse(""),
+            state.value("geminiAnswer").orElse("")
+        );
+        return Map.of("finalAnswer", winner);
+    }))
+    .addEdge(START, "dispatch")
+    .addEdge("dispatch", "gpt")
+    .addEdge("dispatch", "claude")
+    .addEdge("dispatch", "gemini")
+    .addEdge("gpt",    "vote")
+    .addEdge("claude", "vote")
+    .addEdge("gemini", "vote")
+    .addEdge("vote", END)
+    .compile();
+
+voteWorkflow.stream(Map.of("question", "What is 2+2?"),
+    RunnableConfig.builder()
+        .addParallelNodeExecutor("dispatch", ForkJoinPool.commonPool())
+        .build());</code></pre>
+
+<p><strong>wall-clock</strong>:1 个 LLM 调用 ~2s,3 个并发 = 2s(而不是 6s)。</p>
+
+<h2>8. 决策树(用不用并行?)</h2>
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" style="max-width:100%;height:auto;background:#0f172a;border-radius:12px;padding:20px;">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+  </defs>
+
+  <text x="450" y="30" text-anchor="middle" fill="#f1f5f9" font-size="20" font-weight="bold">
+    并行分支选型决策树
+  </text>
+
+  <rect x="350" y="60" width="200" height="50" rx="8" fill="url(#g1)"/>
+  <text x="450" y="92" text-anchor="middle" fill="white" font-size="14" font-weight="bold">有独立子任务吗?</text>
+
+  <line x1="450" y1="110" x2="450" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="200" y1="140" x2="700" y2="140" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="150" y1="140" x2="150" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="140" x2="450" y2="170" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="140" x2="750" y2="170" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="30" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <text x="150" y="195" text-anchor="middle" fill="#10b981" font-size="13" font-weight="bold">无 / 强依赖</text>
+  <text x="150" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">顺序执行即可</text>
+
+  <rect x="330" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#06b6d4" stroke-width="2"/>
+  <text x="450" y="195" text-anchor="middle" fill="#06b6d4" font-size="13" font-weight="bold">有独立子任务(1 层)</text>
+  <text x="450" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">addParallelNodeExecutor</text>
+
+  <rect x="630" y="170" width="240" height="60" rx="6" fill="#1e293b" stroke="#a855f7" stroke-width="2"/>
+  <text x="750" y="195" text-anchor="middle" fill="#a855f7" font-size="13" font-weight="bold">多层嵌套并行</text>
+  <text x="750" y="215" text-anchor="middle" fill="#cbd5e1" font-size="11">用子图(lg02)嵌套</text>
+
+  <line x1="150" y1="230" x2="150" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="450" y1="230" x2="450" y2="260" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="750" y1="230" x2="750" y2="260" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="30" y="260" width="240" height="80" rx="6" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="150" y="285" text-anchor="middle" fill="#10b981" font-size="12" font-weight="bold">零成本</text>
+  <text x="150" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">addEdge(A, B)</text>
+  <text x="150" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">addEdge(B, C)</text>
+  <text x="150" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">.compile()</text>
+
+  <rect x="330" y="260" width="240" height="80" rx="6" fill="#0f172a" stroke="#06b6d4" stroke-width="1"/>
+  <text x="330" y="285" text-anchor="middle" fill="#06b6d4" font-size="12" font-weight="bold">中等成本</text>
+  <text x="330" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">+ addParallelNodeExecutor</text>
+  <text x="330" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">+ 传 runnableConfig</text>
+  <text x="330" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">3 大限制遵守</text>
+
+  <rect x="630" y="260" width="240" height="80" rx="6" fill="#0f172a" stroke="#a855f7" stroke-width="1"/>
+  <text x="750" y="285" text-anchor="middle" fill="#a855f7" font-size="12" font-weight="bold">高灵活</text>
+  <text x="750" y="305" text-anchor="middle" fill="#cbd5e1" font-size="11">子图作并行分支</text>
+  <text x="750" y="320" text-anchor="middle" fill="#cbd5e1" font-size="11">每条分支可多步</text>
+  <text x="750" y="335" text-anchor="middle" fill="#cbd5e1" font-size="11">独立开发测试</text>
+
+  <rect x="50" y="370" width="800" height="150" rx="8" fill="url(#g2)"/>
+  <text x="450" y="395" text-anchor="middle" fill="white" font-size="14" font-weight="bold">5 大实战场景</text>
+  <text x="450" y="418" text-anchor="middle" fill="white" font-size="12">🔀 多 RAG 检索器(关键词 + 向量 + 图谱)→ 1.2s → 0.4s</text>
+  <text x="450" y="438" text-anchor="middle" fill="white" font-size="12">🤖 多 LLM 投票(GPT-4 + Claude + Gemini)→ 综合答案</text>
+  <text x="450" y="458" text-anchor="middle" fill="white" font-size="12">🛠️ 多工具并发(查订单 + 查库存 + 查物流)→ 3s → 1s</text>
+  <text x="450" y="478" text-anchor="middle" fill="white" font-size="12">🔍 多 Moderation 审查 → 1 路失败不影响其他</text>
+  <text x="450" y="498" text-anchor="middle" fill="white" font-size="12">🌐 多语言翻译(5 路并发)→ 5s → 1.5s</text>
+</svg>
+
+<h2>9. 5 个避坑</h2>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 1:不传 runnableConfig,以为在并发</strong><br>
+<strong>症状</strong>:<code>workflow.stream(inputs)</code>(不传 config),<strong>看起来节点都跑了,但实际是顺序的</strong>,wall-clock = sum 而不是 max。<br>
+<strong>根因</strong>:Executor 在 <code>RunnableConfig</code> 里,没传 config = 用默认顺序执行。<br>
+<strong>修法</strong>:<strong>必须</strong>用 <code>workflow.stream(inputs, config)</code>,config 里有 <code>addParallelNodeExecutor</code>。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 2:并行根用了条件边</strong><br>
+<strong>症状</strong>:<code>addConditionalEdges("A", router, mapping)</code> + <code>addEdge("A", "A1")</code> + <code>addEdge("A", "A2")</code> 混用,跑起来报错或行为奇怪。<br>
+<strong>根因</strong>:<strong>限制 3:并行根节点不能用条件边</strong>(避免复杂并发路由)。<br>
+<strong>修法</strong>:要么把条件判断移到 A 节点内部(返回 State 时决定下一步);要么用<strong>子图</strong>(lg02)把条件边封装在子图里,父图只看到 1 个节点。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 3:试图做 2 个并行的 fork</strong><br>
+<strong>症状</strong>:A → [A1, A2, A3] → A4 → [A4.1, A4.2],跑起来第二个 fork 没并发 / 报错。<br>
+<strong>根因</strong>:<strong>限制 2:1 张图只能有 1 个并行步骤</strong>。<br>
+<strong>修法</strong>:
+<ul>
+  <li><strong>方案 1</strong>:用子图 —— 把第二层 fork 包成子图,父图只看到 1 节点</li>
+  <li><strong>方案 2</strong>:合并到第一层(A 的下游) —— 重新设计图结构,避免连续 2 层 fork</li>
+</ul>
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 4:用默认 ForkJoinPool 没改,阻塞 I/O 卡死</strong><br>
+<strong>症状</strong>:并行节点里有阻塞 IO(数据库 / HTTP / 同步 LLM),用 <code>ForkJoinPool.commonPool()</code> 跑,commonPool 线程被占满,其他任务卡死。<br>
+<strong>根因</strong>:<code>commonPool</code> 默认大小 = 机器 CPU 核数 - 1,<strong>适合 CPU 密集型</strong>,<strong>不适合 IO 密集</strong>。<br>
+<strong>修法</strong>:
+<pre><code>// ✅ 自定义 Executor:适合 IO 密集
+ExecutorService ioPool = Executors.newFixedThreadPool(20, r -&gt; {
+    Thread t = new Thread(r, "lg-parallel-io");
+    t.setDaemon(true);
+    return t;
+});
+
+var config = RunnableConfig.builder()
+    .addParallelNodeExecutor("A", ioPool)   // ← 不用 commonPool
+    .build();</code></pre>
+<strong>原则</strong>:LLM 调用 / 数据库查询 / HTTP 调外部 → 用 <strong>固定大小线程池(20-50)</strong>。<strong>纯计算</strong>(数据处理 / 序列化)→ commonPool。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 5:并行节点共享 State 写入冲突</strong><br>
+<strong>症状</strong>:3 个并行节点都返回 <code>Map.of("counter", 1)</code>,最后 counter 总是 1(而不是 3),数据被覆盖。<br>
+<strong>根因</strong>:State 的 <strong>Reducer</strong> 决定怎么合并 —— <strong>覆盖 reducer</strong>(<code>Channel.of((o, n) -&gt; n)</code>)后写覆盖前写,只看到最后一个。<br>
+<strong>修法</strong>:
+<ul>
+  <li><strong>累加字段</strong>(每个并行节点贡献一部分)用 <code>Channels.appender(ArrayList::new)</code></li>
+  <li><strong>独立字段</strong>(每个节点写自己的 key)用 <code>Channel.of((o, n) -&gt; n)</code></li>
+  <li><strong>禁止并行写同一 key</strong>(除非用累加 reducer)</li>
+</ul>
+</div>
+
+<h2>10. 速查表</h2>
+
+<table>
+<thead><tr><th>项</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><strong>核心</strong></td><td>并行节点 = 多下游同时跑(fan-out / fan-in)</td></tr>
+<tr><td><strong>配置</strong></td><td><code>addParallelNodeExecutor("A", Executor)</code></td></tr>
+<tr><td><strong>必传 config</strong></td><td><code>workflow.stream(inputs, config)</code>(否则顺序)</td></tr>
+<tr><td><strong>默认 Executor</strong></td><td><code>ForkJoinPool.commonPool()</code>(CPU 密集)</td></tr>
+<tr><td><strong>IO 密集</strong></td><td>自定义 <code>Executors.newFixedThreadPool(20-50)</code></td></tr>
+<tr><td><strong>限制 1</strong></td><td>只能叉接(1 个 root → N 个分支)</td></tr>
+<tr><td><strong>限制 2</strong></td><td>1 张图只能有 1 个并行步骤</td></tr>
+<tr><td><strong>限制 3</strong></td><td>并行根节点不能用条件边</td></tr>
+<tr><td><strong>突破单步</strong></td><td>用子图作并行分支(lg02)</td></tr>
+<tr><td><strong>状态累加</strong></td><td>并行写同一 key 用 <code>Channels.appender</code></td></tr>
+<tr><td><strong>常见 5 场景</strong></td><td>多 RAG / 多 LLM 投票 / 多工具 / 多 Moderation / 多语言翻译</td></tr>
+<tr><td><strong>wall-clock 优化</strong></td><td>sum → max(N 个任务中最慢那个)</td></tr>
+<tr><td><strong>配合流式(lg04)</strong></td><td>并行 + 流式 = 实时 + 高性能</td></tr>
+</tbody>
+</table>
+
+<h2>11. 本章小结</h2>
+
+<ul>
+  <li><strong>并发是图管的</strong>:用 <code>addParallelNodeExecutor</code> 配 Executor + <strong>必须传 config</strong> 才并发</li>
+  <li><strong>3 大限制</strong>:叉接(1→N)/ 单步(1 张图 1 个 fork)/ 无条件边(根不能条件路由)</li>
+  <li><strong>突破单步</strong>:用子图当并行分支(lg02 组合)</li>
+  <li><strong>Executor 选择</strong>:CPU 密集用 <code>commonPool</code>,IO 密集用自定义 <code>newFixedThreadPool(20-50)</code></li>
+  <li><strong>状态累加</strong>:并行写同一 key 用 <code>Channels.appender</code>(否则被覆盖)</li>
+  <li><strong>5 大场景</strong>:多 RAG 检索 / 多 LLM 投票 / 多工具 / 多 Moderation / 多语言翻译</li>
+  <li><strong>配合 lg04 流式</strong>:并行 + 流式 = 实时 + 高性能</li>
+</ul>
+
+<blockquote class="mihuang">
+  <strong>一句话总结</strong>:LangGraph4j 并行 = <strong>"图管并发 + ForkJoinPool + 3 大限制"</strong>。<strong>默认顺序,配 Executor 才并发</strong>。<strong>必传 config</strong>。多层并行用子图。下一章(lg04 流式传输)让单个 LLM <strong>Token 级别</strong>边生成边推。
+</blockquote>
+
+</main>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

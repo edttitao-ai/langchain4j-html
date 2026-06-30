@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch16 · MCP 模型上下文协议 · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">16</span>MCP 模型上下文协议(Agent 接外部工具的 USB-C)</h1>
+    <p class="hero-sub">5 种 Transport · Client · Provider · Resources · Registry · 跨语言工具标准化</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<code>McpTransport</code>(5 种连接方式)+ <code>DefaultMcpClient</code>(客户端)+ <code>McpToolProvider</code>(工具聚合)+ <code>McpRegistryClient</code>(服务器发现) = <strong>Agent 接外部工具的标准化协议(类似 USB-C)</strong>。MCP 是 Anthropic 2024 年发布的开放协议,让 LLM Agent <strong>不用写 @Tool 适配</strong>就能调 GitHub / Slack / PostgreSQL / Google Maps 等任何暴露 MCP 的服务。<strong>做企业 Agent 集成外部系统(订单库 / 客服通知 / 代码审查),MCP 是 99% 的正解</strong>。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"我们客服 AI 想直接查订单数据库、查物流系统、发 Slack 通知、调 GitHub 提交 bug,集成这些系统要多久?"<br>
+架构师:"传统方式:每个外部系统写一个 @Tool 适配器(GitHub API / Slack SDK / JDBC / Google Maps SDK),共 4 套集成 + 4 套鉴权 + 4 套维护,3 个月。"<br>
+老板:"MCP 呢?"<br>
+架构师:"<strong>2 周</strong>。每个外部系统装一个 MCP 服务器(NPM/Docker/官方提供),Java 侧只配 Transport,工具列表自动拉取。"</p>
+
+<p><strong>❌ 传统 @Tool 适配地狱</strong>(每个外部系统都要写一遍):</p>
+
+<pre><code>// 1. 写 GitHub @Tool 适配(自己封装 SDK)
+@Tool("查询 GitHub Issue")
+public String getIssue(@P("repo") String repo, @P("number") int number) {
+    String token = System.getenv("GITHUB_TOKEN");
+    return HttpClient.newHttpClient().send(
+        HttpRequest.newBuilder()
+            .uri(URI.create("https://api.github.com/repos/" + repo + "/issues/" + number))
+            .header("Authorization", "Bearer " + token)
+            .build(), BodyHandlers.ofString()
+    ).body();
+}
+
+// 2. 写 Slack @Tool 适配(又一遍 SDK + auth)
+@Tool("发 Slack 消息")
+public String sendSlack(@P("channel") String channel, @P("msg") String msg) {
+    String token = System.getenv("SLACK_TOKEN");
+    return HttpClient.newHttpClient().send(...);
+}
+
+// 3. 写 PostgreSQL @Tool 适配(JDBC + SQL 注入防御 + 重试)
+@Tool("查订单")
+public String queryOrder(@P("sql") String sql) { ... }
+
+// 问题:
+// - 每个外部系统写一遍 @Tool(4 套代码 + 4 套 auth)
+// - 外部 API 升级,要改所有 @Tool(GitHub v3 → v4)
+// - 多个 AI Service 重复 @Tool 代码(订单查询 / 客服 AI / 数据分析)
+// - 工具元数据不标准化(LLM 看到的是 @Tool 注释拼凑的 JSON Schema)</code></pre>
+
+<p><strong>✅ MCP 标准化接入</strong>(一行配置接外部):</p>
+
+<pre><code>// 1. 装 GitHub MCP 服务器(NPM 一行)
+McpTransport githubTransport = StdioMcpTransport.builder()
+    .command(List.of("/usr/bin/npm", "exec", "@modelcontextprotocol/server-github"))
+    .logEvents(true)
+    .build();
+
+// 2. 装 Slack MCP 服务器(Docker 一行)
+McpTransport slackTransport = StreamableHttpMcpTransport.builder()
+    .url("https://mcp.slack.com/mcp")  // 官方托管
+    .logRequests(true)
+    .build();
+
+// 3. 装 PostgreSQL MCP 服务器(stdio Docker)
+McpTransport pgTransport = DockerMcpTransport.builder()
+    .image("mcp/postgres")
+    .dockerHost("unix:///var/run/docker.sock")
+    .build();
+
+// 4. 多客户端聚合(1 个 Provider 聚合 3 个 MCP 客户端)
+McpToolProvider toolProvider = McpToolProvider.builder()
+    .mcpClients(
+        DefaultMcpClient.builder().key("github").transport(githubTransport).build(),
+        DefaultMcpClient.builder().key("slack").transport(slackTransport).build(),
+        DefaultMcpClient.builder().key("postgres").transport(pgTransport).build()
+    )
+    .failIfOneServerFails(false)  // 单个挂了不影响其他
+    .filterToolNames(
+        "get_issue", "create_issue", "list_issues",   // GitHub
+        "send_message", "list_channels",               // Slack
+        "query_orders", "get_product"                  // Postgres
+    )
+    .build();
+
+// 5. 注入 AI Service
+Assistant assistant = AiServices.builder(Assistant.class)
+    .chatModel(chatModel)
+    .toolProvider(toolProvider)
+    .build();
+
+String response = assistant.chat("查订单 #20260615-A,如果有质量问题,在 #ops 频道发 Slack");
+// → Agent 自动调用 postgres.query_orders + slack.send_message
+//   不用写任何 @Tool 代码!
+
+// 优势:
+// - MCP 服务器由官方维护,API 升级服务端解决(零客户端修改)
+// - 工具元数据 JSON Schema 标准,LLM 看到规范的 tool description
+// - 多 AI Service 共享同一个 MCP 客户端池
+// - 任何语言都能用(Python / Go / Node 都能接)</code></pre>
+
+<p><strong>🔥 真实成本案例</strong>:某跨境电商要接入 10 个外部系统(订单库 / 物流 / 支付 / Slack / GitHub / Jira / Salesforce / Google Maps / AWS S3 / Slack)。<strong>传统 @Tool 适配</strong>:10 套集成 + 3 个 Java 工程师 × 3 个月 = <strong>¥45 万</strong>(人力)。<strong>MCP 接入</strong>:10 个 MCP 服务器部署(多数官方提供)+ 1 个 Java 工程师 × 2 周 = <strong>¥5 万</strong>。<strong>省 ¥40 万,上线快 5 倍</strong>。</p>
+
+<h3>6 个 MCP 能解决的事</h3>
+<ul>
+  <li><strong>📦 跨境订单直查</strong> — PostgreSQL MCP 让 LLM 直接查订单库(SQL 自动转),不用写中间层 API</li>
+  <li><strong>📞 客服消息群发</strong> — Slack/钉钉 MCP 让 Agent 自动发内部通知(售后 / 财务 / 仓储)</li>
+  <li><strong>🗺️ 物流地址验证</strong> — Google Maps MCP 让 Agent 校验地址 / 计算运费 / 估算送达时间</li>
+  <li><strong>📋 代码仓库协同</strong> — GitHub MCP 让 Agent 自动开 Issue / Review PR(代码审查自动化)</li>
+  <li><strong>📑 实时法规检索</strong> — Brave Search / Google Search MCP 让 Agent 联网查最新跨境法规</li>
+  <li><strong>🔌 跨语言 AI 协同</strong> — Python 写的 AI 助手 + Java 写的订单系统,通过 MCP 互调(协议中立)</li>
+</ul>
+
+<blockquote class="mihuang">
+<strong>口诀</strong>:MCP 就像<strong>USB-C</strong>(一个接口接所有外设)。传统 @Tool 适配像<strong>每个外设买一根专用的线</strong>(USB-A / Mini-USB / Lightning / DC 圆口...)。<strong>2024 年起所有 AI 工具都该走 MCP</strong>。
+</blockquote>
+
+<h2>2. 核心架构</h2>
+
+<p>MCP 是<strong>客户端-服务器</strong>架构,基于 <strong>JSON-RPC 2.0</strong> 协议通信。</p>
+
+<pre><code>【MCP 4 层架构】
+
+  ┌──────────────────────────────────────────────────┐
+  │ AI Agent / AI Service(Java 侧 LangChain4j)        │
+  │   Assistant assistant = AiServices.builder()...  │
+  └─────────────────────┬────────────────────────────┘
+                        │ 调用 tool(name, args)
+                        ▼
+  ┌──────────────────────────────────────────────────┐
+  │ McpToolProvider(工具聚合器)                      │
+  │   - 多客户端聚合(GitHub + Slack + Postgres)       │
+  │   - 名称白名单 / BiPredicate 过滤                │
+  │   - 工具重命名(toolNameMapper)                    │
+  └─────────────────────┬────────────────────────────┘
+                        │ 转发
+                        ▼
+  ┌──────────────────────────────────────────────────┐
+  │ DefaultMcpClient(MCP 客户端)                     │
+  │   - 工具缓存(cacheToolList)                       │
+  │   - 工具列表 + Resources + Prompts               │
+  └─────────────────────┬────────────────────────────┘
+                        │ JSON-RPC 2.0
+                        │ (5 种 Transport 之一)
+                        ▼
+  ┌──────────────────────────────────────────────────┐
+  │ MCP 服务器(外部进程)                            │
+  │   - NPM 子进程(stdio)                           │
+  │   - Docker 容器(Docker stdio)                    │
+  │   - HTTP 服务(Streamable HTTP)                   │
+  │   - WebSocket 服务                               │
+  │   - HTTP+SSE 服务(传统,弃用)                    │
+  └──────────────────────────────────────────────────┘</code></pre>
+
+<h3>2.1 三步上手</h3>
+
+<pre><code>// 1. Transport(选择连接方式)
+McpTransport transport = StdioMcpTransport.builder()
+    .command(List.of("/usr/bin/npm", "exec", "@modelcontextprotocol/server-everything@0.6.2"))
+    .logEvents(true)
+    .build();
+
+// 2. Client(从 Transport 创建客户端)
+McpClient mcpClient = DefaultMcpClient.builder()
+    .key("MyMCPClient")           // 可选,但多个客户端必填
+    .transport(transport)
+    .cacheToolList(true)          // 默认 true
+    .build();
+
+// 3. Provider(从 Client 创建工具聚合)
+McpToolProvider toolProvider = McpToolProvider.builder()
+    .mcpClients(mcpClient)
+    .build();</code></pre>
+
+<h2>3. 5 种 Transport(选连接方式)</h2>
+
+<h3>3.1 stdio(本地子进程)</h3>
+
+<p><strong>用途</strong>:MCP 服务器作为<strong>本地子进程</strong>,通过 stdin/stdout 通信。<strong>最常用</strong>。</p>
+
+<pre><code>// 启动 NPM 包形式的 MCP 服务器
+McpTransport transport = StdioMcpTransport.builder()
+    .command(List.of(
+        "/usr/bin/npm", "exec",
+        "@modelcontextprotocol/server-github@1.0.0"
+    ))
+    .logEvents(true)        // 打印 MCP 协议交互
+    .logRequests(true)
+    .logResponses(true)
+    .build();
+
+// 也可以直接执行本地二进制
+.command(List.of(
+    "/usr/local/bin/my-custom-mcp-server",
+    "--config", "/etc/mcp/config.json"
+))</code></pre>
+
+<blockquote class="mihuang">
+<strong>💡 适用场景</strong>:开发环境 / 本地工具(NPM 包 / Python 脚本 / Go 二进制)。简单稳定,无需网络。
+</blockquote>
+
+<h3>3.2 Streamable HTTP(SSE 流式,新一代标准)</h3>
+
+<p><strong>用途</strong>:MCP 服务器作为<strong>HTTP 服务</strong>,客户端发 POST 请求,服务器可以一次性响应或开 SSE 流发多次。<strong>2024+ 新标准,推荐生产用</strong>。</p>
+
+<pre><code>// 远程 MCP 服务器
+McpTransport transport = StreamableHttpMcpTransport.builder()
+    .url("http://localhost:3001/mcp")     // 服务器 POST 端点
+    .logRequests(true)
+    .logResponses(true)
+    .subsidiaryChannel(true)              // 启用 GET-based SSE(接收服务器主动通知)
+    .build();
+
+// 重要:可流式 HTTP 是 MCP 新标准(2024 年底发布)
+// 老式 HTTP/SSE 已被弃用,见 3.4</code></pre>
+
+<blockquote class="mihuang">
+<strong>⚠️ 自动重连</strong>:SSE 流断开后,传输会自动重连(默认 5 秒,遵循服务器 retry 设置)。
+</blockquote>
+
+<h3>3.3 WebSocket(实验性)</h3>
+
+<p><strong>用途</strong>:MCP 服务器作为 <strong>WebSocket 服务</strong>。<strong>实验性</strong>,目前只与 Quarkus MCP 服务器扩展兼容。</p>
+
+<pre><code>McpTransport transport = WebSocketMcpTransport.builder()
+    .url("ws://localhost:3001/mcp/ws")
+    .logResponses(true)
+    .logRequests(true)
+    .build();</code></pre>
+
+<h3>3.4 HTTP/SSE(传统,已弃用 ⚠️)</h3>
+
+<p><strong>用途</strong>:传统 MCP 协议传输。<strong>已被官方弃用,未来将移除</strong>。仅维护老项目兼容。</p>
+
+<pre><code>// 传统方式:两个 URL(sseUrl + POST 由服务器动态返回)
+McpTransport transport = HttpMcpTransport.builder()
+    .sseUrl("http://localhost:3001/sse")     // SSE 通道 URL
+    .logRequests(true)
+    .logResponses(true)
+    .build();
+
+// ⚠️ 已弃用,新项目请用 Streamable HTTP</code></pre>
+
+<h3>3.5 Docker stdio(容器化)</h3>
+
+<p><strong>用途</strong>:MCP 服务器以<strong>容器镜像</strong>分发,用 Docker stdio 跑。<strong>生产隔离首选</strong>。</p>
+
+<pre><code>// 1. 加依赖
+&lt;dependency&gt;
+    &lt;groupId&gt;dev.langchain4j&lt;/groupId&gt;
+    &lt;artifactId&gt;langchain4j-mcp-docker&lt;/artifactId&gt;
+    &lt;version&gt;1.11.8-beta19&lt;/version&gt;
+&lt;/dependency&gt;
+
+// 2. Docker Transport
+McpTransport transport = DockerMcpTransport.builder()
+    .image("mcp/time")                                  // 官方镜像
+    .dockerHost("unix:///var/run/docker.sock")           // Docker daemon
+    .logEvents(true)
+    .build();
+
+// 3. 或本地构建的镜像
+.image("mycompany/mcp-internal-tools:1.2.0")</code></pre>
+
+<blockquote class="mihuang">
+<strong>💡 优势</strong>:容器隔离 + 标准化分发 + 版本管理 + 多实例编排。<strong>生产推荐</strong>(特别是接入多个内部 MCP 服务时)。
+</blockquote>
+
+<h2>4. McpClient 客户端</h2>
+
+<p><code>DefaultMcpClient</code> 是 MCP 协议 Java 侧默认实现。它<strong>从 Transport 拉取工具列表</strong>,并维护内部缓存。</p>
+
+<pre><code>// 基础创建
+McpClient mcpClient = DefaultMcpClient.builder()
+    .key("github-mcp")         // 客户端唯一标识(多客户端必填)
+    .transport(transport)      // 4 种 Transport 之一
+    .cacheToolList(true)       // 默认 true,工具列表缓存
+    .build();
+
+// 工具缓存策略
+// 默认 cacheToolList(true) → 拉一次,除非服务器通知"列表变了"否则不重拉
+// cacheToolList(false)     → 每次 AI 调用都重拉(慢,慎用)
+
+// 手动清缓存(服务器动态新增工具后)
+mcpClient.evictToolListCache();
+
+// 手动执行工具(在 AI Service 外)
+ToolExecutionRequest request = ToolExecutionRequest.builder()
+    .name("get_issue")
+    .arguments("{\"repo\": \"langchain4j\", \"number\": 1234}")
+    .build();
+String result = mcpClient.executeTool(request);
+
+// 列出所有可用工具
+ListToolsResult tools = mcpClient.listTools();</code></pre>
+
+<blockquote class="mihuang">
+<strong>💡 key 的作用</strong>:多 MCP 客户端时,key 用于区分(过滤 / 日志 / 路由)。<strong>多个 client 时必填</strong>(否则冲突)。
+</blockquote>
+
+<h2>5. McpToolProvider 工具聚合</h2>
+
+<p>Provider 聚合<strong>多个 MCP 客户端</strong>的工具,统一暴露给 AI Service。可配置过滤 / 容错 / 重命名。</p>
+
+<h3>5.1 多客户端聚合</h3>
+
+<pre><code>McpToolProvider toolProvider = McpToolProvider.builder()
+    .mcpClients(githubClient, slackClient, postgresClient)  // 多个
+    .failIfOneServerFails(false)  // 单个挂了不影响其他
+    .build();</code></pre>
+
+<h3>5.2 filterToolNames 名称白名单</h3>
+
+<pre><code>// MCP 服务器可能暴露几十个工具,LLM 用不到全部
+// 用 filterToolNames 只暴露必要的(降低 LLM 幻觉)
+McpToolProvider toolProvider = McpToolProvider.builder()
+    .mcpClients(githubClient)
+    .filterToolNames(
+        "get_issue", "get_issue_comments", "list_issues"  // 只读权限
+        // 没有 create_issue / delete_issue / update_issue
+    )
+    .build();</code></pre>
+
+<h3>5.3 filter BiPredicate 动态过滤</h3>
+
+<p><strong>用途</strong>:多 MCP 客户端同名工具冲突时,按规则选哪个。</p>
+
+<pre><code>// 两个 MCP 客户端都有 echoInteger,只保留 numeric-mcp 的
+McpToolProvider toolProvider = McpToolProvider.builder()
+    .mcpClients(mcpClient1, mcpClient2)
+    .filter((mcpClient, tool) -&gt;
+        !tool.name().startsWith("echoInteger")
+        || mcpClient.key().equals("numeric-mcp")
+    )
+    .build();
+
+// filter 多次调用是 AND 合取</code></pre>
+
+<h3>5.4 toolNameMapper 重命名</h3>
+
+<pre><code>// 工具名不直观 / 冲突时,可重命名
+McpToolProvider toolProvider = McpToolProvider.builder()
+    .mcpClients(githubClient, slackClient)
+    .toolNameMapper((mcpClient, tool) -&gt;
+        mcpClient.key() + "__" + tool.name()
+    )
+    .build();
+// GitHub 的 get_issue → github__get_issue(避免冲突,带命名空间)</code></pre>
+
+<h3>5.5 动态添加 / 移除客户端</h3>
+
+<pre><code>// 运行时动态管理(支持 hot reload)
+toolProvider.addMcpClient(newMcpClient);    // 加
+toolProvider.removeMcpClient("old-client"); // 删
+toolProvider.clearMcpClients();             // 全清</code></pre>
+
+<h2>6. 集成到 AI Service</h2>
+
+<h3>6.1 方式一:toolProvider 注入(推荐)</h3>
+
+<pre><code>Bot bot = AiServices.builder(Bot.class)
+    .chatModel(chatModel)
+    .toolProvider(toolProvider)   // ← 注入 MCP 工具聚合
+    .build();
+
+String response = bot.chat("查订单 #20260615-A 的状态");
+// AI 自动决定调 postgres.query_orders("order_id=20260615-A")</code></pre>
+
+<h3>6.2 方式二:tools Map 手动</h3>
+
+<pre><code>// 更精细控制(每个工具自己写 ToolExecutor)
+Map&lt;ToolSpecification, ToolExecutor&gt; tools = mcpClient.listTools().stream()
+    .collect(Collectors.toMap(
+        tool -&gt; tool,
+        tool -&gt; new McpToolExecutor(mcpClient)
+    ));
+
+Bot bot = AiServices.builder(Bot.class)
+    .chatModel(chatModel)
+    .tools(tools)  // ← 手动 Map
+    .build();</code></pre>
+
+<blockquote class="mihuang">
+<strong>💡 选哪种</strong>:<strong>多数项目用方式一</strong>(toolProvider 简单)。需要自定义执行逻辑 / 加缓存 / 重试时用方式二。
+</blockquote>
+
+<h2>7. MCP Resources(不只是 Tools)</h2>
+
+<p>MCP 服务器<strong>不只暴露 Tools</strong>,还暴露 <strong>Resources</strong>(文件 / 数据库 / API 数据)。Tools 是 LLM <strong>主动调用</strong>,Resources 是 LLM <strong>读取</strong>。</p>
+
+<h3>7.1 DefaultMcpResourcesAsToolsPresenter(自动暴露)</h3>
+
+<pre><code>// MCP 服务器暴露的资源(类似 Web 文件系统)
+ReadResourceResult result = mcpClient.readResource("file:///docs/catalog.json");
+// 返回 McpTextResourceContents 或 McpBlobResourceContents
+
+// 自动通过 Tools 暴露给 AI(LLM 不需要直接调 readResource)
+// 设了 presenter 后,ToolProvider 自动加两个合成工具:
+McpToolProvider toolProvider = McpToolProvider.builder()
+    .mcpClients(mcpClient)
+    .resourcesAsToolsPresenter(new DefaultMcpResourcesAsToolsPresenter())
+    .build();
+
+// 自动多了两个工具:
+// 1. list_resources → 列出所有资源(JSON 数组)
+// 2. get_resource(server_name, uri) → 读取指定资源
+
+// LLM 自动决定:"先 list_resources 看有什么,再 get_resource 读详情"</code></pre>
+
+<blockquote class="mihuang">
+<strong>💡 Tools vs Resources</strong>:Tools 是<strong>动作</strong>(改状态:发消息 / 创建订单);Resources 是<strong>数据</strong>(读状态:文件 / 配置)。MCP 用同一协议暴露两种,统一接口。
+</blockquote>
+
+<h2>8. MCP Registry(服务器发现)</h2>
+
+<p>MCP Registry 是<strong>官方 MCP 服务器目录</strong>(https://registry.modelcontextprotocol.io),可搜索公开的 MCP 服务器。</p>
+
+<pre><code>// 1. 创建 Registry 客户端(默认指向官方 registry)
+McpRegistryClient registry = DefaultMcpRegistryClient.builder()
+    .baseUrl("https://registry.modelcontextprotocol.io")  // 默认就是这个
+    .build();
+
+// 2. 搜索 MCP 服务器
+McpServerListRequest request = McpServerListRequest.builder()
+    .search("github")   // 关键字搜索
+    .limit(10)           // 最多 10 个结果
+    .build();
+
+List&lt;McpServer&gt; servers = registry.listServers(request);
+
+// 3. 拿到服务器后,自动创建 MCP 客户端
+for (McpServer server : servers) {
+    System.out.println(server.name() + " - " + server.description());
+    // 安装命令:npm install @modelcontextprotocol/server-XXX
+}</code></pre>
+
+<blockquote class="mihuang">
+<strong>⚠️ 安全警告</strong>:从 Registry 找到的 MCP 服务器<strong>可以执行任意代码</strong>(尤其 stdio / Docker 本地跑)。<strong>运行前务必验证可信度</strong>。LangChain4j 默认不自动执行,需手动确认。
+</blockquote>
+
+<h2>9. 5 种 Transport 选型决策</h2>
+
+<table>
+<thead><tr><th>Transport</th><th>连接方式</th><th>推荐场景</th></tr></thead>
+<tbody>
+<tr><td><strong>stdio</strong></td><td>本地子进程 stdin/stdout</td><td>开发 / 本地工具 / NPM 包 / 简单稳定</td></tr>
+<tr><td><strong>Streamable HTTP</strong></td><td>HTTP POST + SSE 流</td><td><strong>生产首选</strong>/ 远程服务 / 跨网络 / 新标准</td></tr>
+<tr><td><strong>WebSocket</strong></td><td>WS 双工连接</td><td>Quarkus MCP / 实验性 / 双工需求</td></tr>
+<tr><td><strong>HTTP/SSE</strong>(弃用)</td><td>传统 SSE + POST</td><td><strong>仅老项目兼容</strong>/ 新项目不要用</td></tr>
+<tr><td><strong>Docker stdio</strong></td><td>容器内 stdio</td><td>生产隔离 / 多 MCP 服务 / 版本管理</td></tr>
+</tbody>
+</table>
+
+<p><strong>决策流程</strong>:</p>
+
+<ul>
+  <li><strong>开发 + 单一工具</strong> → <code>stdio</code>(NPM 包)</li>
+  <li><strong>生产 + 远程服务</strong> → <code>Streamable HTTP</code>(新标准)</li>
+  <li><strong>生产 + 多 MCP 服务 + 隔离</strong> → <code>Docker stdio</code></li>
+  <li><strong>Quarkus 生态</strong> → <code>WebSocket</code></li>
+  <li><strong>老 MCP 1.0 服务器</strong> → <code>HTTP/SSE</code>(短期兼容,长期升级)</li>
+</ul>
+
+<h2>10. 8 避坑</h2>
+
+<h3>坑 1 ❌ 多客户端 key 不设导致冲突</h3>
+<p><strong>症状</strong>:<code>IllegalStateException: duplicate key</code><br>
+<strong>根因</strong>:多个 MCP 客户端时没设 key,默认冲突。<br>
+<strong>修法</strong>:<strong>每个客户端都设唯一 key</strong>(如 <code>"github-mcp"</code> / <code>"slack-mcp"</code>)。</p>
+
+<h3>坑 2 ❌ 工具过多导致 LLM 幻觉</h3>
+<p><strong>症状</strong>:LLM 调错工具,或干脆不调。<br>
+<strong>根因</strong>:MCP 服务器暴露几十个工具,LLM 选择困难,幻觉率高。<br>
+<strong>修法</strong>:<strong>严格 filterToolNames</strong>(只暴露 5-10 个相关工具),<strong>filter BiPredicate</strong> 二次过滤。</p>
+
+<h3>坑 3 ❌ 工具列表缓存过期</h3>
+<p><strong>症状</strong>:MCP 服务器加了新工具,AI 还是看不到。<br>
+<strong>根因</strong>:<code>cacheToolList=true</code>(默认)缓存到进程生命周期,服务器端加工具不通知。<br>
+<strong>修法</strong>:服务器动态加工具后,调 <code>mcpClient.evictToolListCache()</code> 清缓存。</p>
+
+<h3>坑 4 ❌ Registry 服务器未验证就跑</h3>
+<p><strong>症状</strong>:执行了恶意 MCP 服务器,被攻击(读文件 / 装后门)。<br>
+<strong>根因</strong>:MCP 服务器有<strong>任意代码执行权限</strong>(尤其 stdio / Docker)。<br>
+<strong>修法</strong>:<strong>只用官方 / 大厂 / 公司内部的 MCP 服务器</strong>;第三方服务器先读源码 + 沙箱跑。</p>
+
+<h3>坑 5 ❌ Docker Transport 缺 /var/run/docker.sock 权限</h3>
+<p><strong>症状</strong>:<code>Permission denied</code> 连不上 Docker daemon。<br>
+<strong>根因</strong>:Java 进程用户(非 root)没 docker group 权限。<br>
+<strong>修法</strong>:1)把用户加 <code>docker</code> 组;2)用 rootless docker;3)改用远程 Docker host(TLS 认证)。</p>
+
+<h3>坑 6 ❌ HTTP/SSE 用了 Streamable HTTP 代码</h3>
+<p><strong>症状</strong>:连不上服务器 / 数据乱码。<br>
+<strong>根因</strong>:MCP 1.0 用 <code>HttpMcpTransport</code>(<code>sseUrl</code>),新 MCP 用 <code>StreamableHttpMcpTransport</code>(<code>url</code>),混用失败。<br>
+<strong>修法</strong>:<strong>看服务器版本选 Transport</strong>;新项目只用 Streamable HTTP。</p>
+
+<h3>坑 7 ❌ toolExecutionRequest arguments 传 Map</h3>
+<p><strong>症状</strong>:<code>IllegalArgumentException: arguments must be JSON string</code><br>
+<strong>根因</strong>:<code>arguments()</code> 是 JSON 字符串,不是 Map。<br>
+<strong>修法</strong>:</p>
+<pre><code>// ❌ Map
+.arguments(Map.of("a", "b"))
+
+// ✅ JSON 字符串
+.arguments("{\"a\": \"b\"}")</code></pre>
+
+<h3>坑 8 ❌ 同步阻塞调用导致 MCP 雪崩</h3>
+<p><strong>症状</strong>:多个 AI 调用并发,MCP 服务器被打爆。<br>
+<strong>根因</strong>:MCP Transport 默认<strong>同步阻塞</strong>,没有限流。<br>
+<strong>修法</strong>:1)MCP 服务器侧加限流;2)Provider 用线程池隔离;<code>.executor(Executors.newFixedThreadPool(10))</code>;3)failIfOneServerFails(false) 避免一个挂全挂。</p>
+
+<h2>10. API 速查表(22 个)</h2>
+
+<table>
+<thead><tr><th>层级</th><th>类-接口</th><th>包路径</th><th>一句话作用</th></tr></thead>
+<tbody>
+<tr><td>协议</td><td><code>McpTransport</code></td><td><code>dev.langchain4j.mcp.transport</code></td><td>Transport 接口(5 种实现)</td></tr>
+<tr><td>Transport</td><td><code>StdioMcpTransport</code></td><td><code>dev.langchain4j.mcp.transport.stdio</code></td><td>本地子进程(stdin/stdout)</td></tr>
+<tr><td>Transport</td><td><code>StreamableHttpMcpTransport</code></td><td><code>dev.langchain4j.mcp.transport.http</code></td><td>HTTP POST + SSE 流(新标准)</td></tr>
+<tr><td>Transport</td><td><code>WebSocketMcpTransport</code></td><td><code>dev.langchain4j.mcp.transport.ws</code></td><td>WebSocket(实验性)</td></tr>
+<tr><td>Transport</td><td><code>HttpMcpTransport</code></td><td><code>dev.langchain4j.mcp.transport.http</code></td><td>传统 HTTP/SSE(已弃用)</td></tr>
+<tr><td>Transport</td><td><code>DockerMcpTransport</code></td><td><code>dev.langchain4j.mcp.transport.docker</code></td><td>Docker 容器 stdio</td></tr>
+<tr><td>Client</td><td><code>McpClient</code></td><td><code>dev.langchain4j.mcp.client</code></td><td>MCP 客户端接口</td></tr>
+<tr><td>Client</td><td><code>DefaultMcpClient</code></td><td><code>dev.langchain4j.mcp.client</code></td><td>默认 MCP 客户端实现</td></tr>
+<tr><td>Client</td><td><code>cacheToolList</code></td><td><code>DefaultMcpClient.builder()</code></td><td>工具列表缓存开关</td></tr>
+<tr><td>Client</td><td><code>evictToolListCache</code></td><td><code>McpClient</code></td><td>手动清工具缓存</td></tr>
+<tr><td>Provider</td><td><code>McpToolProvider</code></td><td><code>dev.langchain4j.mcp</code></td><td>工具聚合器</td></tr>
+<tr><td>Provider</td><td><code>mcpClients</code></td><td><code>McpToolProvider.builder()</code></td><td>聚合多个 MCP 客户端</td></tr>
+<tr><td>Provider</td><td><code>filterToolNames</code></td><td><code>McpToolProvider.builder()</code></td><td>工具名白名单</td></tr>
+<tr><td>Provider</td><td><code>filter</code></td><td><code>McpToolProvider.builder()</code></td><td>BiPredicate 动态过滤</td></tr>
+<tr><td>Provider</td><td><code>toolNameMapper</code></td><td><code>McpToolProvider.builder()</code></td><td>工具重命名(命名空间)</td></tr>
+<tr><td>Provider</td><td><code>failIfOneServerFails</code></td><td><code>McpToolProvider.builder()</code></td><td>单服务器失败是否 fail-fast</td></tr>
+<tr><td>Resources</td><td><code>ReadResourceResult</code></td><td><code>dev.langchain4j.mcp.client</code></td><td>读资源结果(文本/二进制)</td></tr>
+<tr><td>Resources</td><td><code>McpTextResourceContents</code></td><td><code>dev.langchain4j.mcp</code></td><td>文本资源内容</td></tr>
+<tr><td>Resources</td><td><code>McpBlobResourceContents</code></td><td><code>dev.langchain4j.mcp</code></td><td>二进制资源内容</td></tr>
+<tr><td>Resources</td><td><code>DefaultMcpResourcesAsToolsPresenter</code></td><td><code>dev.langchain4j.mcp</code></td><td>Resources 自动转 Tools</td></tr>
+<tr><td>Registry</td><td><code>McpRegistryClient</code></td><td><code>dev.langchain4j.mcp.registryclient</code></td><td>注册中心客户端接口</td></tr>
+<tr><td>Registry</td><td><code>DefaultMcpRegistryClient</code></td><td><code>dev.langchain4j.mcp.registryclient</code></td><td>默认注册中心实现</td></tr>
+<tr><td>集成</td><td><code>AiServices.toolProvider()</code></td><td><code>dev.langchain4j.service</code></td><td>把 MCP Provider 注入 AI Service</td></tr>
+<tr><td>集成</td><td><code>McpToolExecutor</code></td><td><code>dev.langchain4j.mcp</code></td><td>手动执行工具的 Executor</td></tr>
+</tbody>
+</table>
+
+<h2>11. 本章小结 + 下一章</h2>
+
+<ul>
+  <li><strong>3 步上手</strong>:Transport → Client → Provider,3 行代码接 MCP 服务器</li>
+  <li><strong>5 种 Transport</strong>:stdio(本地)/ Streamable HTTP(生产首选)/ WebSocket(实验)/ HTTP/SSE(弃用)/ Docker stdio(隔离)</li>
+  <li><strong>Provider 4 大功能</strong>:多客户端聚合 / filterToolNames 白名单 / filter BiPredicate 动态 / toolNameMapper 重命名 / failIfOneServerFails 容错</li>
+  <li><strong>Resources</strong>:MCP 不只 Tools,还暴露 Resources(文件 / 数据);<code>DefaultMcpResourcesAsToolsPresenter</code> 自动转 Tools</li>
+  <li><strong>Registry</strong>:官方 <code>registry.modelcontextprotocol.io</code> 搜公开 MCP 服务器;⚠️ 安全警告</li>
+  <li><strong>8 避坑</strong>:key 必填 / 工具白名单 / 缓存清理 / Registry 安全 / Docker 权限 / Transport 版本 / arguments JSON 字符串 / 限流</li>
+  <li><strong>跨境电商专属</strong>:PostgreSQL MCP 直查订单 / Slack MCP 客服通知 / Google Maps 物流 / GitHub 代码审查 / Brave 法规检索 / 跨语言协同 —— <strong>6 大场景全 MCP 化</strong></li>
+</ul>
+
+<blockquote class="mihuang">
+<strong>口诀</strong>:<strong>本地用 stdio</strong>,<strong>生产用 Streamable HTTP</strong>,<strong>隔离用 Docker</strong>。<strong>新项目别碰 HTTP/SSE</strong>(已弃用)。<strong>严格 filterToolNames</strong>,<strong>Registry 服务器必验证</strong>。
+</blockquote>
+
+<p><strong>下一章预告</strong>:ch17 <strong>Guardrails 输入输出护栏</strong> —— Agent 有了 MCP 工具(能改外部状态),谁来<strong>把关</strong>?Guardrails 在 LLM 调用前后插<strong>护栏</strong>(输入审核 / 输出校验 / 内容脱敏 / 风险拦截),防止 Agent 调用危险工具(删数据库 / 发敏感消息 / 泄露隐私)。<strong>Agent 章节的"安全收口篇"</strong>。</p>
+
+<hr>
+<p class="footer-src">📖 本章基于官方文档:<a href="file:///E:/hermes_chat/langchain4j-html/Model%20Context%20Protocol%20(MCP)%20_LangChain4j.html">Model Context Protocol (MCP) _ LangChain4j.html</a> 提炼 + 实战扩展 · 内容仅基于 LangChain4j 官方资料,不与其他框架混搭 · MCP 协议 2024 年发布,API 仍在演进</p>
+
+</main>
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

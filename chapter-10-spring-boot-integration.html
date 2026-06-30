@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch10 · Spring Boot Integration · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">企业集成 · 自动装配 Spring Bean</span>
+    <h1><span class="num">10</span>Spring Boot 集成(国人最熟)</h1>
+    <p class="lead">ch01-09 你写的是<strong>纯 Java SDK</strong>调用,要自己 <code>Builder</code> + 拼 prompt + 管记忆。<strong>Spring Boot Starter</strong> 把这一切<strong>全自动</strong>:加依赖 + 写 <code>application.properties</code> + 写 interface + <code>@Autowired</code> 注入。类比 Spring Data JPA、Spring Security。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:<code>langchain4j-open-ai-spring-boot-starter</code> + <code>application.properties</code> + <code>@AiService</code> interface = 一个能跑的生产级 AI 后端。LangChain4j 帮你把所有组件(<code>ChatModel</code> / <code>ChatMemory</code> / <code>ContentRetriever</code> / <code>@Tool</code>) 注册成 Spring Bean,直接 <code>@Autowired</code> 用。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>老板:"我们 Java 后端用 Spring Boot 3 全家桶,AI 这一块能不能也接进来?不要让我每次都 <code>new OpenAiChatModel(...)</code>。"</p>
+  <p><strong>解法</strong>:Spring Boot 的<strong>自动装配</strong>(auto-configuration)机制。LangChain4j 提供了 <code>langchain4j-*-spring-boot-starter</code> 系列,加依赖 + 写 properties 就好。</p>
+
+  <h3>5 个 Spring Boot 集成能解决的事</h3>
+  <ul>
+    <li><strong>零配置 Bean 注册</strong> — 加 starter,自动有 <code>ChatModel</code> / <code>StreamingChatModel</code> Bean 可注入</li>
+    <li><strong>配置文件管参数</strong> — <code>application.properties</code> 里写 api-key / model-name,不用硬编码</li>
+    <li><strong>声明式 AI 服务</strong> — <code>@AiService</code> interface,自动代理(比 <code>AiServices.create()</code> 更优雅)</li>
+    <li><strong>多模型并存</strong> — OpenAI + Ollama 同时配置,按需注入(<code>@AiService(wiringMode = EXPLICIT)</code>)</li>
+    <li><strong>Spring 生态打通</strong> — Micrometer 监控、Actuator 健康检查、Reactor Flux 流式、单元测试 <code>@SpringBootTest</code></li>
+  </ul>
+
+  <div class="callout tip">
+    <p><strong>💡 国人友好</strong>:Spring Boot 是国内 Java 后端事实标准。LangChain4j 的 Spring Boot 集成做得非常深,几乎是<strong>生产首选</strong>。如果你们公司是 Spring 技术栈,<strong>别用纯 SDK 模式</strong>,直接上 Starter。</p>
+  </div>
+
+  <h2>2. 加依赖(命名约定)</h2>
+  <p>Starter 命名非常规则:<code>langchain4j-{集成名}-spring-boot-starter</code>(Boot 3)或 <code>...-spring-boot4-starter</code>(Boot 4)。</p>
+
+  <h3>2.1 Spring Boot 3(3.5+)</h3>
+  <pre><code><span class="cm">&lt;!-- pom.xml --&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+    <span class="kw">&lt;groupId&gt;</span>dev.langchain4j<span class="kw">&lt;/groupId&gt;</span>
+    <span class="kw">&lt;artifactId&gt;</span>langchain4j-open-ai-spring-boot-starter<span class="kw">&lt;/artifactId&gt;</span>
+    <span class="kw">&lt;version&gt;</span>1.11.8-beta19<span class="kw">&lt;/version&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span>
+
+<span class="cm">&lt;!-- 如果要用 AI Services 声明式 --&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+    <span class="kw">&lt;groupId&gt;</span>dev.langchain4j<span class="kw">&lt;/groupId&gt;</span>
+    <span class="kw">&lt;artifactId&gt;</span>langchain4j-spring-boot-starter<span class="kw">&lt;/artifactId&gt;</span>
+    <span class="kw">&lt;version&gt;</span>1.11.8-beta19<span class="kw">&lt;/version&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h3>2.2 Spring Boot 4(4.0+)</h3>
+  <pre><code><span class="cm">&lt;!-- 仅 artifactId 不同,版本号保持一致 --&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+    <span class="kw">&lt;groupId&gt;</span>dev.langchain4j<span class="kw">&lt;/groupId&gt;</span>
+    <span class="kw">&lt;artifactId&gt;</span>langchain4j-open-ai-spring-boot4-starter<span class="kw">&lt;/artifactId&gt;</span>
+    <span class="kw">&lt;version&gt;</span>1.11.8-beta19<span class="kw">&lt;/version&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout warn">
+    <p><strong>⚠️ 版本对应</strong>:Boot 3 starter 用 <code>-spring-boot-starter</code> 后缀,Boot 4 用 <code>-spring-boot4-starter</code> 后缀。<strong>不要混搭</strong>!Boot 3 项目硬塞 Boot 4 starter → <code>NoSuchMethodError</code>;反之亦然。</p>
+  </div>
+
+  <h2>3. application.properties 配置</h2>
+  <p>所有模型参数走配置文件,LangChain4j 帮你自动绑定到 Bean:</p>
+  <pre><code><span class="cm"># application.properties</span>
+langchain4j.open-ai.chat-model.api-key=${OPENAI_API_KEY}
+langchain4j.open-ai.chat-model.model-name=gpt-4o-mini
+langchain4j.open-ai.chat-model.temperature=0.7
+langchain4j.open-ai.chat-model.max-tokens=1000
+langchain4j.open-ai.chat-model.log-requests=true
+langchain4j.open-ai.chat-model.log-responses=true
+
+<span class="cm"># 可选:超时配置</span>
+langchain4j.open-ai.chat-model.timeout=60s</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <p>加完依赖 + 写好 properties,Spring 容器里就有现成的 <code>ChatModel</code> Bean,直接注入:</p>
+  <pre><code><span class="kw">@RestController</span>
+<span class="kw">public class</span> <span class="ty">ChatController</span> {
+
+    <span class="kw">private final</span> <span class="ty">ChatModel</span> chatModel;
+
+    <span class="kw">public</span> <span class="fn">ChatController</span>(<span class="ty">ChatModel</span> chatModel) {  <span class="cm">// 直接注入</span>
+        <span class="kw">this</span>.chatModel = chatModel;
+    }
+
+    <span class="at">@GetMapping</span>(<span class="st">"/chat"</span>)
+    <span class="kw">public</span> <span class="ty">String</span> <span class="fn">chat</span>(<span class="at">@RequestParam</span> <span class="ty">String</span> message) {
+        <span class="kw">return</span> chatModel.<span class="fn">chat</span>(message);
+    }
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>4. 3 种 Bean 装配方式</h2>
+  <p>LangChain4j Spring Boot 集成支持三种模式,从简单到复杂。</p>
+
+  <table>
+    <thead>
+      <tr><th>方式</th><th>适用场景</th><th>配置</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>自动装配</strong></td><td>单模型 / 单工具</td><td>默认:加 starter 即可,Spring 自动接线</td></tr>
+      <tr><td><strong>显式装配</strong></td><td>多模型 / 多工具,按 interface 选择</td><td><code>@AiService(wiringMode = EXPLICIT)</code> + <code>chatModel = "bean名"</code></td></tr>
+      <tr><td><strong>事件监听</strong></td><td>运行时反射看哪些 AI 服务注册了</td><td>实现 <code>ApplicationListener&lt;AiServiceRegisteredEvent&gt;</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.1 自动元件接线(默认)</h3>
+  <p>Spring 上下文里<strong>只要存在</strong>以下 Bean,会自动连到 <code>@AiService</code> interface:</p>
+
+  <pre><code><span class="cm">// 这些类型 Spring 会自动注入给 @AiService interface</span>
+ChatModel              <span class="cm">// 普通聊天</span>
+StreamingChatModel     <span class="cm">// 流式聊天</span>
+ChatMemory             <span class="cm">// 单聊记忆</span>
+ChatMemoryProvider     <span class="cm">// 多聊记忆</span>
+ContentRetriever       <span class="cm">// RAG 检索器</span>
+RetrievalAugmentor     <span class="cm">// RAG 增强器</span>
+ToolProvider           <span class="cm">// 工具提供者</span>
+
+<span class="cm">// 带 @Tool 注解的类自动被发现(需被 @Component 标记)</span>
+<span class="at">@Service</span>
+<span class="kw">public class</span> <span class="ty">BookingTools</span> {
+
+    <span class="kw">private final</span> <span class="ty">BookingService</span> bookingService;
+
+    <span class="kw">public</span> <span class="fn">BookingTools</span>(<span class="ty">BookingService</span> bookingService) {
+        <span class="kw">this</span>.bookingService = bookingService;
+    }
+
+    <span class="at">@Tool</span>
+    <span class="kw">public</span> <span class="ty">Booking</span> <span class="fn">getBookingDetails</span>(<span class="ty">String</span> bookingNumber,
+                                     <span class="ty">String</span> customerName,
+                                     <span class="ty">String</span> customerSurname) {
+        <span class="kw">return</span> bookingService.<span class="fn">getBookingDetails</span>(bookingNumber, customerName, customerSurname);
+    }
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout tip">
+    <p><strong>💡 神奇之处</strong>:你写一个 interface + <code>@AiService</code>,LangChain4j <strong>自动</strong>找上下文里的 <code>ChatModel</code>、<code>ChatMemory</code>、<code>BookingTools</code>(<code>@Component</code> + <code>@Tool</code>),全部连起来生成代理类。</p>
+  </div>
+
+  <h3>4.2 显式元件布线(多模型场景)</h3>
+  <p>当有<strong>多个 AI 服务</strong>,每个用不同 <code>ChatModel</code> 时,用 <code>@AiService(wiringMode = EXPLICIT)</code> 显式指定。</p>
+
+  <h4>Step 1:在 properties 里配多个模型</h4>
+  <pre><code><span class="cm"># application.properties</span>
+
+<span class="cm"># OpenAI(快,贵)</span>
+langchain4j.open-ai.chat-model.api-key=${OPENAI_API_KEY}
+langchain4j.open-ai.chat-model.model-name=gpt-4o-mini
+
+<span class="cm"># Ollama(本地,免费)</span>
+langchain4j.ollama.chat-model.base-url=http://localhost:11434
+langchain4j.ollama.chat-model.model-name=llama3.1</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h4>Step 2:用 @AiService 指定哪个 interface 用哪个 Bean</h4>
+  <pre><code><span class="at">@AiService</span>(wiringMode = <span class="ty">WiringMode</span>.EXPLICIT, chatModel = <span class="st">"openAiChatModel"</span>)
+<span class="kw">interface</span> <span class="ty">OpenAiAssistant</span> {
+    <span class="at">@SystemMessage</span>(<span class="st">"You are a polite assistant"</span>)
+    <span class="ty">String</span> <span class="fn">chat</span>(<span class="ty">String</span> userMessage);
+}
+
+<span class="at">@AiService</span>(wiringMode = <span class="ty">WiringMode</span>.EXPLICIT, chatModel = <span class="st">"ollamaChatModel"</span>)
+<span class="kw">interface</span> <span class="ty">OllamaAssistant</span> {
+    <span class="at">@SystemMessage</span>(<span class="st">"你是一个本地助手"</span>)
+    <span class="ty">String</span> <span class="fn">chat</span>(<span class="ty">String</span> userMessage);
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h4>Step 3:在 Controller 注入</h4>
+  <pre><code><span class="at">@RestController</span>
+<span class="kw">public class</span> <span class="ty">MultiModelController</span> {
+
+    <span class="kw">private final</span> <span class="ty">OpenAiAssistant</span> openAiAssistant;
+    <span class="kw">private final</span> <span class="ty">OllamaAssistant</span> ollamaAssistant;
+
+    <span class="kw">public</span> <span class="fn">MultiModelController</span>(<span class="ty">OpenAiAssistant</span> openAiAssistant,
+                                <span class="ty">OllamaAssistant</span> ollamaAssistant) {
+        <span class="kw">this</span>.openAiAssistant = openAiAssistant;
+        <span class="kw">this</span>.ollamaAssistant = ollamaAssistant;
+    }
+
+    <span class="at">@GetMapping</span>(<span class="st">"/cloud-chat"</span>)
+    <span class="kw">public</span> <span class="ty">String</span> <span class="fn">cloudChat</span>(<span class="ty">String</span> msg) {
+        <span class="kw">return</span> openAiAssistant.<span class="fn">chat</span>(msg);  <span class="cm">// 走 GPT</span>
+    }
+
+    <span class="at">@GetMapping</span>(<span class="st">"/local-chat"</span>)
+    <span class="kw">public</span> <span class="ty">String</span> <span class="fn">localChat</span>(<span class="ty">String</span> msg) {
+        <span class="kw">return</span> ollamaAssistant.<span class="fn">chat</span>(msg);  <span class="cm">// 走本地 Llama</span>
+    }
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout info">
+    <p><strong>生产实战</strong>:简单对话 → 本地 Ollama(省钱);复杂推理 → OpenAI(质量)。一个 Spring Boot 项目<strong>两个模型共存</strong>,按需路由。</p>
+  </div>
+
+  <h3>4.3 监听 AI 服务注册事件</h3>
+  <p>想在<strong>运行时反射</strong>看哪些 AI 服务已注册?实现 <code>ApplicationListener&lt;AiServiceRegisteredEvent&gt;</code>:</p>
+  <pre><code><span class="at">@Component</span>
+<span class="kw">class</span> <span class="ty">AiServiceRegisteredEventListener</span>
+        <span class="kw">implements</span> <span class="ty">ApplicationListener</span>&lt;<span class="ty">AiServiceRegisteredEvent</span>&gt; {
+
+    <span class="at">@Override</span>
+    <span class="kw">public void</span> <span class="fn">onApplicationEvent</span>(<span class="ty">AiServiceRegisteredEvent</span> event) {
+        <span class="ty">Class</span>&lt;?&gt; aiServiceClass = event.<span class="fn">aiServiceClass</span>();
+        <span class="ty">List</span>&lt;<span class="ty">ToolSpecification</span>&gt; toolSpecs = event.<span class="fn">toolSpecifications</span>();
+
+        <span class="ty">System</span>.out.<span class="fn">println</span>(<span class="st">"AI 服务注册:"</span> + aiServiceClass.<span class="fn">getSimpleName</span>());
+        <span class="ty">System</span>.out.<span class="fn">println</span>(<span class="st">"  工具数:"</span> + toolSpecs.<span class="fn">size</span>());
+        toolSpecs.<span class="fn">forEach</span>(t -&gt;
+            <span class="ty">System</span>.out.<span class="fn">println</span>(<span class="st">"  - "</span> + t.<span class="fn">name</span>() + <span class="st">": "</span> + t.<span class="fn">description</span>())
+        );
+    }
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <p><strong>用途</strong>:管理后台 / 调试面板 / 动态文档生成。启动时打印所有 AI 服务 + 工具清单。</p>
+
+  <h2>5. 流式响应(Reactor Flux)</h2>
+  <p>Spring Boot 项目常用 Reactor,LangChain4j 支持 <code>Flux&lt;String&gt;</code> 作为返回类型:</p>
+  <pre><code><span class="at">@AiService</span>
+<span class="kw">interface</span> <span class="ty">StreamingAssistant</span> {
+    <span class="at">@SystemMessage</span>(<span class="st">"You are a polite assistant"</span>)
+    <span class="ty">Flux</span>&lt;<span class="ty">String</span>&gt; <span class="fn">chat</span>(<span class="ty">String</span> userMessage);  <span class="cm">// 流式</span>
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <pre><code><span class="cm">&lt;!-- 需要 langchain4j-reactor 模块 --&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+    <span class="kw">&lt;groupId&gt;</span>dev.langchain4j<span class="kw">&lt;/groupId&gt;</span>
+    <span class="kw">&lt;artifactId&gt;</span>langchain4j-reactor<span class="kw">&lt;/artifactId&gt;</span>
+    <span class="kw">&lt;version&gt;</span>1.11.8-beta19<span class="kw">&lt;/version&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <p>SSE 端点用 <code>Flux</code> 直接返回给前端:</p>
+  <pre><code><span class="at">@GetMapping</span>(value = <span class="st">"/stream-chat"</span>, produces = <span class="ty">MediaType</span>.TEXT_EVENT_STREAM_VALUE)
+<span class="kw">public</span> <span class="ty">Flux</span>&lt;<span class="ty">String</span>&gt; <span class="fn">streamChat</span>(<span class="ty">String</span> msg) {
+    <span class="kw">return</span> streamingAssistant.<span class="fn">chat</span>(msg);
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>6. 可观测性(Micrometer 监控)</h2>
+  <p>生产环境要监控 AI 调用:耗时、token 数、错误率。LangChain4j 提供 <code>ChatModelListener</code> 拦截器:</p>
+
+  <h3>6.1 加依赖</h3>
+  <pre><code><span class="cm">&lt;!-- Micrometer 集成 --&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+    <span class="kw">&lt;groupId&gt;</span>dev.langchain4j<span class="kw">&lt;/groupId&gt;</span>
+    <span class="kw">&lt;artifactId&gt;</span>langchain4j-micrometer-metrics<span class="kw">&lt;/artifactId&gt;</span>
+    <span class="kw">&lt;version&gt;</span>1.11.8-beta19<span class="kw">&lt;/version&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span>
+
+<span class="cm">&lt;!-- Spring Boot Actuator --&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+    <span class="kw">&lt;groupId&gt;</span>org.springframework.boot<span class="kw">&lt;/groupId&gt;</span>
+    <span class="kw">&lt;artifactId&gt;</span>spring-boot-starter-actuator<span class="kw">&lt;/artifactId&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h3>6.2 注册监听器</h3>
+  <pre><code><span class="at">@Configuration</span>
+<span class="kw">class</span> <span class="ty">MetricsConfig</span> {
+
+    <span class="at">@Bean</span>
+    <span class="ty">ChatModelListener</span> <span class="fn">chatModelListener</span>() {
+        <span class="kw">return new</span> <span class="ty">ChatModelListener</span>() {
+
+            <span class="kw">private static final</span> <span class="ty">Logger</span> log = <span class="ty">LoggerFactory</span>.<span class="fn">getLogger</span>(<span class="ty">ChatModelListener</span>.<span class="kw">class</span>);
+
+            <span class="at">@Override</span>
+            <span class="kw">public void</span> <span class="fn">onRequest</span>(<span class="ty">ChatModelRequestContext</span> req) {
+                log.<span class="fn">info</span>(<span class="st">"→ 请求:{}"</span>, req.<span class="fn">chatRequest</span>().<span class="fn">messages</span>());
+            }
+
+            <span class="at">@Override</span>
+            <span class="kw">public void</span> <span class="fn">onResponse</span>(<span class="ty">ChatModelResponseContext</span> resp) {
+                log.<span class="fn">info</span>(<span class="st">"← 响应:{}"</span>, resp.<span class="fn">chatResponse</span>().<span class="fn">aiMessage</span>().<span class="fn">text</span>());
+            }
+
+            <span class="at">@Override</span>
+            <span class="kw">public void</span> <span class="fn">onError</span>(<span class="ty">ChatModelErrorContext</span> err) {
+                log.<span class="fn">error</span>(<span class="st">"✗ 异常"</span>, err.<span class="fn">error</span>());
+            }
+        };
+    }
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <p>加上 <code>langchain4j-micrometer-metrics</code> 后,LangChain4j 自动把 token 数、耗时接到 Micrometer。<code>/actuator/metrics</code> 能看到 <code>langchain4j.tokens</code>、<code>langchain4j.duration</code> 等指标。</p>
+
+  <h2>7. 测试(@SpringBootTest)</h2>
+  <p>集成测试 <code>@SpringBootTest</code>,LangChain4j 提供 <code>langchain4j-spring-boot-starter</code> 测试支持:</p>
+  <pre><code><span class="kw">import static</span> org.assertj.core.api.Assertions.*;
+
+<span class="at">@SpringBootTest</span>
+<span class="kw">class</span> <span class="ty">AssistantIT</span> {  <span class="cm">// IT = Integration Test</span>
+
+    <span class="at">@Autowired</span>
+    <span class="ty">Assistant</span> assistant;
+
+    <span class="at">@Test</span>
+    <span class="kw">void</span> <span class="fn">should_answer_simple_question</span>() {
+        <span class="ty">String</span> answer = assistant.<span class="fn">chat</span>(<span class="st">"What is the capital of France?"</span>);
+        <span class="fn">assertThat</span>(answer).<span class="fn">containsIgnoringCase</span>(<span class="st">"Paris"</span>);
+    }
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout tip">
+    <p><strong>💡 Mock 测试</strong>:不想每次跑测试都打真实 LLM?用 <code>@MockBean</code> 替换 <code>ChatModel</code>:</p>
+    <pre><code><span class="at">@SpringBootTest</span>
+<span class="kw">class</span> <span class="ty">AssistantTest</span> {
+
+    <span class="at">@MockBean</span>
+    <span class="ty">ChatModel</span> chatModel;
+
+    <span class="at">@Autowired</span>
+    <span class="ty">Assistant</span> assistant;
+
+    <span class="at">@Test</span>
+    <span class="kw">void</span> <span class="fn">should_call_chat_model</span>() {
+        <span class="ty">String</span> mockAnswer = <span class="st">"Paris"</span>;
+        <span class="at">@SuppressWarnings</span>(<span class="st">"unchecked"</span>)
+        <span class="ty">ChatResponse</span> resp = <span class="ty">ChatResponse</span>.<span class="fn">builder</span>()
+                .<span class="fn">aiMessage</span>(<span class="ty">AiMessage</span>.<span class="fn">from</span>(mockAnswer))
+                .<span class="fn">build</span>();
+        <span class="fn">when</span>(chatModel.<span class="fn">chat</span>(<span class="fn">any</span>(<span class="ty">ChatRequest</span>.<span class="kw">class</span>))).<span class="fn">thenReturn</span>(resp);
+
+        <span class="ty">String</span> answer = assistant.<span class="fn">chat</span>(<span class="st">"capital of France?"</span>);
+        <span class="fn">assertThat</span>(answer).<span class="fn">isEqualTo</span>(<span class="st">"Paris"</span>);
+        <span class="fn">verify</span>(chatModel).<span class="fn">chat</span>(<span class="fn">any</span>(<span class="ty">ChatRequest</span>.<span class="kw">class</span>));
+    }
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+  </div>
+
+  <h2>8. 选型决策树</h2>
+  <p>Spring Boot 集成有 3 种入口,选哪个?</p>
+  <svg viewBox="0 0 800 480" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;background:#fafbfc;border-radius:8px;padding:16px">
+    <defs>
+      <marker id="arr10" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+      </marker>
+    </defs>
+    <rect x="280" y="20" width="240" height="50" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="400" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#1e40af">Spring Boot 集成方式?</text>
+
+    <rect x="60" y="120" width="180" height="70" rx="8" fill="#d1fae5" stroke="#10b981" stroke-width="2"/>
+    <text x="150" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#065f46">A. 单模型 + 简单</text>
+    <text x="150" y="170" text-anchor="middle" font-size="11" fill="#065f46">自动装配模式</text>
+
+    <rect x="310" y="120" width="180" height="70" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="400" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#92400e">B. 多模型并存</text>
+    <text x="400" y="170" text-anchor="middle" font-size="11" fill="#92400e">显式装配 + EXPLICIT</text>
+
+    <rect x="560" y="120" width="180" height="70" rx="8" fill="#ede9fe" stroke="#8b5cf6" stroke-width="2"/>
+    <text x="650" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#5b21b6">C. 运行时反射</text>
+    <text x="650" y="170" text-anchor="middle" font-size="11" fill="#5b21b6">监听注册事件</text>
+
+    <line x1="400" y1="70" x2="150" y2="120" stroke="#64748b" stroke-width="2" marker-end="url(#arr10)"/>
+    <line x1="400" y1="70" x2="400" y2="120" stroke="#64748b" stroke-width="2" marker-end="url(#arr10)"/>
+    <line x1="400" y1="70" x2="650" y2="120" stroke="#64748b" stroke-width="2" marker-end="url(#arr10)"/>
+
+    <rect x="60" y="240" width="180" height="70" rx="8" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="150" y="262" text-anchor="middle" font-size="11" fill="#1e293b">加 starter 依赖</text>
+    <text x="150" y="280" text-anchor="middle" font-size="11" fill="#1e293b">写 properties</text>
+    <text x="150" y="298" text-anchor="middle" font-size="11" fill="#1e293b">@Autowired ChatModel</text>
+
+    <rect x="310" y="240" width="180" height="70" rx="8" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="400" y="262" text-anchor="middle" font-size="11" fill="#1e293b">配多模型 properties</text>
+    <text x="400" y="280" text-anchor="middle" font-size="11" fill="#1e293b">@AiService(EXPLICIT)</text>
+    <text x="400" y="298" text-anchor="middle" font-size="11" fill="#1e293b">按需 @Autowired</text>
+
+    <rect x="560" y="240" width="180" height="70" rx="8" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="650" y="262" text-anchor="middle" font-size="11" fill="#1e293b">ApplicationListener</text>
+    <text x="650" y="280" text-anchor="middle" font-size="11" fill="#1e293b">反射 AI 服务 + 工具</text>
+    <text x="650" y="298" text-anchor="middle" font-size="11" fill="#1e293b">管理后台 / 文档生成</text>
+
+    <line x1="150" y1="190" x2="150" y2="240" stroke="#64748b" stroke-width="2" marker-end="url(#arr10)"/>
+    <line x1="400" y1="190" x2="400" y2="240" stroke="#64748b" stroke-width="2" marker-end="url(#arr10)"/>
+    <line x1="650" y1="190" x2="650" y2="240" stroke="#64748b" stroke-width="2" marker-end="url(#arr10)"/>
+
+    <rect x="200" y="370" width="400" height="80" rx="8" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
+    <text x="400" y="396" text-anchor="middle" font-size="13" font-weight="bold" fill="#991b1b">⚠️ Boot 3 / Boot 4 starter 不通用</text>
+    <text x="400" y="416" text-anchor="middle" font-size="11" fill="#991b1b">看项目 parent BOM 决定用 -spring-boot-starter 还是 -spring-boot4-starter</text>
+    <text x="400" y="434" text-anchor="middle" font-size="11" fill="#991b1b">混搭 = NoSuchMethodError</text>
+  </svg>
+
+  <h2>9. 配置项速查表</h2>
+  <table>
+    <thead>
+      <tr><th>配置前缀</th><th>常见属性</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>langchain4j.open-ai.chat-model.*</code></td><td>api-key / model-name / temperature / max-tokens / timeout / log-requests / log-responses</td><td>OpenAI ChatModel</td></tr>
+      <tr><td><code>langchain4j.open-ai.streaming-chat-model.*</code></td><td>同上</td><td>OpenAI 流式</td></tr>
+      <tr><td><code>langchain4j.ollama.chat-model.*</code></td><td>base-url / model-name</td><td>Ollama 本地</td></tr>
+      <tr><td><code>langchain4j.qianfan.chat-model.*</code></td><td>api-key / secret-key / model-name</td><td>百度千帆</td></tr>
+      <tr><td><code>langchain4j.dashscope.chat-model.*</code></td><td>api-key / model-name</td><td>阿里通义千问</td></tr>
+      <tr><td><code>langchain4j.zhipu.chat-model.*</code></td><td>api-key / model-name</td><td>智谱 GLM</td></tr>
+      <tr><td><code>langchain4j.open-ai.embedding-model.*</code></td><td>api-key / model-name</td><td>OpenAI Embedding</td></tr>
+      <tr><td><code>langchain4j.open-ai.embedding-store.*</code></td><td>某些存储需要额外配置</td><td>向量存储</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout info">
+    <p><strong>配置项通式</strong>:<code>langchain4j.{集成名}.{组件名}.{属性}</code>。所有 ChatModel / StreamingChatModel / EmbeddingModel 都遵循这模式。集成名对应 starter artifactId(<code>open-ai</code>、<code>ollama</code>、<code>qianfan</code> ...)。</p>
+  </div>
+
+  <h2>10. 5 个真实避坑(从官方文档 + 生产事故)</h2>
+
+  <div class="callout warn">
+    <p><strong>避坑 1:Boot 3 / Boot 4 starter 不能混</strong></p>
+    <p>项目是 Spring Boot 3.x → 必须用 <code>-spring-boot-starter</code> 后缀;</p>
+    <p>项目是 Spring Boot 4.x → 必须用 <code>-spring-boot4-starter</code> 后缀。</p>
+    <p>混搭症状:<code>NoSuchMethodError</code>、<code>ClassNotFoundException</code>。LangChain4j 的 Boot 集成<strong>强依赖 Spring 版本</strong>(有些 API 只在 Boot 4 有)。</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>避坑 2:api-key 别硬编码</strong></p>
+    <p>永远用 <code>${OPENAI_API_KEY}</code> 占位符,从环境变量读。提交到 git 仓库的 key = 跑路风险。生产建议上<strong>配置中心</strong>(Nacos / Apollo / Vault)。</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>避坑 3:log-requests / log-responses 生产慎开</strong></p>
+    <p>开发环境开起来排查 prompt 很爽,但生产环境会把<strong>用户对话完整打日志</strong>(含隐私 / PII)。要么关掉,要么加 <code>MDC</code> 过滤敏感字段。</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>避坑 4:timeout 单位</strong></p>
+    <p><code>timeout=60s</code> 是 <code>Duration</code> 解析,可用 <code>30s</code> / <code>2m</code> / <code>PT60S</code>(ISO-8601)。<strong>不能</strong>写 <code>60000</code>(会被解析成 60000 毫秒 = 60 秒,但代码读起来不直观)。</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>避坑 5:@AiService interface 必须能被 Spring 扫到</strong></p>
+    <p>interface 放在 <code>com.example.app</code>(主类同包或子包)就没问题。放错包 → Spring 扫不到 → 启动报 <code>NoSuchBeanDefinitionException</code>。要么用 <code>@ComponentScan("com.example")</code> 显式指定。</p>
+  </div>
+
+  <h2>11. 记忆口诀</h2>
+  <blockquote style="border-left:4px solid #f59e0b;padding:12px 20px;background:#fffbeb;border-radius:4px;margin:20px 0">
+    <strong>🎯 Spring Boot 集成三件套</strong>:<br>
+    <strong>Starter 依赖</strong>(自动装配 Bean) + <strong>application.properties</strong>(管参数) + <strong>@AiService interface</strong>(声明式)<br>
+    多模型走 <strong>EXPLICIT</strong>,运行时反射听 <strong>AiServiceRegisteredEvent</strong><br>
+    Boot 3 / Boot 4 <strong>starter 后缀不同</strong>,混搭 = 报错
+  </blockquote>
+
+  <h2>12. 与基础篇的衔接</h2>
+  <ul>
+    <li>ch05 AI Services 的 <code>AiServices.create()</code> → Spring Boot 里变成 <code>@AiService</code> 注解,Spring 自动生成代理</li>
+    <li>ch02 Chat Memory → Spring 里用 <code>ChatMemoryProvider</code> Bean 注入</li>
+    <li>ch04 Response Streaming → Spring 里用 <code>Flux&lt;String&gt;</code> + SSE</li>
+    <li>ch06 Tools → Spring 里 <code>@Component</code> + <code>@Tool</code>,Spring 自动发现</li>
+    <li>ch07 Structured Outputs → Spring 里 <code>responseSchema()</code> 在 properties 配</li>
+  </ul>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 高级篇 · ch10 v1 浅版 · 源:<code>Spring Boot Integration _ LangChain4j.html</code>(1.5MB / 27 代码块 / 12210 字)</p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

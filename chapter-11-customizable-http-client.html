@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch11 · Customizable HTTP Client · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">底层网络 · 替换 HTTP 客户端</span>
+    <h1><span class="num">11</span>可定制的 HTTP 客户端</h1>
+    <p class="lead">LangChain4j 默认用 JDK 自带的 <code>HttpClient</code> 调 LLM 提供商 API。但你想加代理 / 自签名证书 / 复杂超时 / 连接池?<strong>换底层 HTTP 客户端</strong>:JDK / Spring RestClient / Apache HttpClient / OkHttp。本章教你怎么切换 + 怎么注入自定义配置。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:LangChain4j 把"调用 LLM API"抽成 <code>HttpClient</code> SPI(服务提供接口)。底层实现<strong>可插拔</strong>:想用 OkHttp 换 JDK、用 Spring 的连接池、自己塞 SSL 证书 —— 只需实现/选一个 <code>HttpClient</code> Builder 注入 <code>OpenAiChatModel.builder().httpClientBuilder(...)</code>。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>老板:"我们 AI 服务要部署在内网,但 LLM 在云上。要走代理 / 自签证书 / 复杂超时策略,JDK 默认 HttpClient 满足不了。"</p>
+  <p><strong>解法</strong>:LangChain4j 把 HTTP 调用<strong>抽象成 SPI</strong>。你要做的只是把底层换成 OkHttp / Apache / Spring RestClient,这些库已经封装了代理 / SSL / 连接池。</p>
+
+  <h3>5 个 HTTP 客户端能解决的事</h3>
+  <ul>
+    <li><strong>代理支持</strong> — 公司内网 → 走 HTTP/SOCKS 代理出去</li>
+    <li><strong>SSL 自定义</strong> — 自签证书 / 公司 CA / 双向认证 mTLS</li>
+    <li><strong>连接池调优</strong> — 高并发场景复用连接,避免每次握手</li>
+    <li><strong>超时精细化</strong> — 连接超时 / 读超时 / 写超时分别设置</li>
+    <li><strong>拦截器 / 过滤器</strong> — 加自定义 Header、记录日志、重试</li>
+  </ul>
+
+  <h2>2. 4 种 HTTP 客户端实现</h2>
+  <p>目前 LangChain4j 提供 4 种 <code>HttpClient</code> 实现(都是 <code>HttpClientBuilder</code> SPI):</p>
+
+  <table>
+    <thead>
+      <tr><th>实现</th><th>模块</th><th>默认场景</th><th>特点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>JdkHttpClient</strong></td><td><code>langchain4j-http-client-jdk</code></td><td>纯 Java SDK 默认</td><td>JDK 自带,零依赖,但功能弱</td></tr>
+      <tr><td><strong>SpringRestClient</strong></td><td><code>langchain4j-http-client-spring-restclient</code></td><td>Spring Boot 默认</td><td>Spring 生态友好,自动用 Spring 配置</td></tr>
+      <tr><td><strong>ApacheHttpClient</strong></td><td><code>langchain4j-http-client-apache</code></td><td>需要高级特性</td><td>成熟稳定,代理 / SSL / 池齐全</td></tr>
+      <tr><td><strong>OkHttpClient</strong></td><td><code>langchain4j-http-client-okhttp</code></td><td>Android / 高并发</td><td>轻量,连接池优秀,Kotlin 友好</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout tip">
+    <p><strong>💡 默认行为</strong>:</p>
+    <ul>
+      <li>用 <code>langchain4j-open-ai</code> SDK → 默认 <code>JdkHttpClient</code></li>
+      <li>用 <code>langchain4j-open-ai-spring-boot-starter</code> → 默认 <code>SpringRestClient</code></li>
+      <li>想换 Apache 或 OkHttp → 加对应依赖,LangChain4j 自动切换(谁在 classpath 优先用谁)</li>
+    </ul>
+  </div>
+
+  <h2>3. 自定义 JDK HttpClient</h2>
+  <p>最常见的自定义:加 SSL 上下文 / 连接超时:</p>
+  <pre><code><span class="cm">// JDK 原生 Builder</span>
+<span class="ty">HttpClient</span>.<span class="ty">Builder</span> httpClientBuilder = <span class="ty">HttpClient</span>.<span class="fn">newBuilder</span>()
+    .<span class="fn">sslContext</span>(myCustomSslContext)      <span class="cm">// 自签证书</span>
+    .<span class="fn">connectTimeout</span>(<span class="ty">Duration</span>.<span class="fn">ofSeconds</span>(<span class="nm">10</span>));
+
+<span class="cm">// 包成 LangChain4j 的 JdkHttpClientBuilder</span>
+<span class="ty">JdkHttpClientBuilder</span> jdkHttpClientBuilder = <span class="ty">JdkHttpClient</span>.<span class="fn">builder</span>()
+    .<span class="fn">httpClientBuilder</span>(httpClientBuilder);
+
+<span class="cm">// 注入 ChatModel</span>
+<span class="ty">OpenAiChatModel</span> model = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+    .<span class="fn">httpClientBuilder</span>(jdkHttpClientBuilder)
+    .<span class="fn">apiKey</span>(<span class="ty">System</span>.<span class="fn">getenv</span>(<span class="st">"OPENAI_API_KEY"</span>))
+    .<span class="fn">modelName</span>(<span class="st">"gpt-4o-mini"</span>)
+    .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout warn">
+    <p><strong>注意</strong>:<code>httpClientBuilder()</code> 接受的是 LangChain4j 自己的 <code>HttpClientBuilder</code> SPI(<code>JdkHttpClientBuilder</code>、<code>SpringRestClientBuilder</code> 等),<strong>不是</strong> JDK 的 <code>HttpClient.Builder</code>。两者要互转:把 JDK Builder 用 <code>JdkHttpClient.builder().httpClientBuilder(...)</code> 包装一层。</p>
+  </div>
+
+  <h2>4. 自定义 Spring RestClient</h2>
+  <p>Spring Boot 6.1+ 提供 <code>RestClient</code>(替代 RestTemplate 的现代 API)。LangChain4j 可以包一层:</p>
+  <pre><code><span class="cm">// Spring 6.1+ 的 RestClient Builder</span>
+<span class="ty">RestClient</span>.<span class="ty">Builder</span> restClientBuilder = <span class="ty">RestClient</span>.<span class="fn">builder</span>()
+    .<span class="fn">requestFactory</span>(<span class="kw">new</span> <span class="ty">HttpComponentsClientHttpRequestFactory</span>());  <span class="cm">// 换底层用 Apache</span>
+
+<span class="cm">// 包装给 LangChain4j</span>
+<span class="ty">SpringRestClientBuilder</span> springBuilder = <span class="ty">SpringRestClient</span>.<span class="fn">builder</span>()
+    .<span class="fn">restClientBuilder</span>(restClientBuilder);
+
+<span class="ty">OpenAiChatModel</span> model = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+    .<span class="fn">httpClientBuilder</span>(springBuilder)
+    .<span class="fn">apiKey</span>(...)
+    .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>5. 自定义 Apache HttpClient</h2>
+  <p>Apache HttpClient 5 功能最强,适合企业级:</p>
+  <pre><code><span class="cm">// Apache HttpClient 5 Builder</span>
+<span class="ty">org</span>.apache.hc.client5.http.impl.classic.<span class="ty">HttpClientBuilder</span> apacheBuilder =
+    <span class="ty">org</span>.apache.hc.client5.http.impl.classic.<span class="ty">HttpClients</span>.<span class="fn">custom</span>()
+        .<span class="fn">setConnectionManager</span>(
+            <span class="ty">PoolingHttpClientConnectionManagerBuilder</span>.<span class="fn">create</span>()
+                .<span class="fn">setMaxConnTotal</span>(<span class="nm">200</span>)         <span class="cm">// 最大连接数</span>
+                .<span class="fn">setMaxConnPerRoute</span>(<span class="nm">50</span>)        <span class="cm">// 每路由最大</span>
+                .<span class="fn">build</span>())
+        .<span class="fn">setDefaultRequestConfig</span>(
+            <span class="ty">RequestConfig</span>.<span class="fn">custom</span>()
+                .<span class="fn">setConnectTimeout</span>(<span class="nm">10</span>, <span class="ty">TimeUnit</span>.SECONDS)
+                .<span class="fn">setResponseTimeout</span>(<span class="nm">60</span>, <span class="ty">TimeUnit</span>.SECONDS)
+                .<span class="fn">build</span>());
+
+<span class="ty">ApacheHttpClientBuilder</span> builder = <span class="ty">ApacheHttpClient</span>.<span class="fn">builder</span>()
+    .<span class="fn">httpClientBuilder</span>(apacheBuilder);
+
+<span class="ty">OpenAiChatModel</span> model = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+    .<span class="fn">httpClientBuilder</span>(builder)
+    .<span class="fn">apiKey</span>(...)
+    .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout tip">
+    <p><strong>💡 加依赖</strong>:用 Apache 实现需加 <code>langchain4j-http-client-apache</code>:</p>
+    <pre><code><span class="kw">&lt;dependency&gt;</span>
+    <span class="kw">&lt;groupId&gt;</span>dev.langchain4j<span class="kw">&lt;/groupId&gt;</span>
+    <span class="kw">&lt;artifactId&gt;</span>langchain4j-http-client-apache<span class="kw">&lt;/artifactId&gt;</span>
+    <span class="kw">&lt;version&gt;</span>1.11.8-beta19<span class="kw">&lt;/version&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+  </div>
+
+  <h2>6. 自定义 OkHttp</h2>
+  <p>OkHttp 轻量,Android 标配,Java 后端也常用:</p>
+  <pre><code><span class="cm">// OkHttp Builder</span>
+<span class="ty">okhttp3.OkHttpClient</span>.<span class="ty">Builder</span> okHttpBuilder = <span class="kw">new</span> <span class="ty">okhttp3.OkHttpClient</span>.<span class="ty">Builder</span>()
+    .<span class="fn">connectTimeout</span>(<span class="nm">10</span>, <span class="ty">TimeUnit</span>.SECONDS)
+    .<span class="fn">readTimeout</span>(<span class="nm">60</span>, <span class="ty">TimeUnit</span>.SECONDS)
+    .<span class="fn">proxy</span>(<span class="kw">new</span> <span class="ty">Proxy</span>(<span class="ty">Proxy</span>.<span class="ty">Type</span>.HTTP,
+                    <span class="kw">new</span> <span class="ty">InetSocketAddress</span>(<span class="st">"proxy.company.com"</span>, <span class="nm">8080</span>)))  <span class="cm">// 代理</span>
+    .<span class="fn">addInterceptor</span>(<span class="kw">new</span> <span class="ty">MyAuthInterceptor</span>());  <span class="cm">// 自定义拦截器</span>
+
+<span class="ty">OkHttpClientBuilder</span> builder = <span class="ty">OkHttpClient</span>.<span class="fn">builder</span>()
+    .<span class="fn">okHttpClientBuilder</span>(okHttpBuilder);
+
+<span class="ty">OpenAiChatModel</span> model = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+    .<span class="fn">httpClientBuilder</span>(builder)
+    .<span class="fn">apiKey</span>(...)
+    .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>7. 选型决策树</h2>
+  <p>4 种 HTTP 客户端怎么选?</p>
+  <svg viewBox="0 0 800 480" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;background:#fafbfc;border-radius:8px;padding:16px">
+    <defs>
+      <marker id="arr11" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+      </marker>
+    </defs>
+    <rect x="280" y="20" width="240" height="50" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="400" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#1e40af">需要定制 HTTP 客户端吗?</text>
+
+    <rect x="100" y="120" width="180" height="60" rx="8" fill="#d1fae5" stroke="#10b981" stroke-width="2"/>
+    <text x="190" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#065f46">A. 不需要</text>
+    <text x="190" y="168" text-anchor="middle" font-size="11" fill="#065f46">默认 JDK 即可</text>
+
+    <rect x="310" y="120" width="180" height="60" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="400" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#92400e">B. Spring 生态</text>
+    <text x="400" y="168" text-anchor="middle" font-size="11" fill="#92400e">用 SpringRestClient</text>
+
+    <rect x="520" y="120" width="180" height="60" rx="8" fill="#ede9fe" stroke="#8b5cf6" stroke-width="2"/>
+    <text x="610" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#5b21b6">C. 重型企业级</text>
+    <text x="610" y="168" text-anchor="middle" font-size="11" fill="#5b21b6">Apache HttpClient</text>
+
+    <rect x="730" y="120" width="60" height="60" rx="8" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
+    <text x="760" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#991b1b">D. Android</text>
+    <text x="760" y="168" text-anchor="middle" font-size="11" fill="#991b1b">OkHttp</text>
+
+    <line x1="400" y1="70" x2="190" y2="120" stroke="#64748b" stroke-width="2" marker-end="url(#arr11)"/>
+    <line x1="400" y1="70" x2="400" y2="120" stroke="#64748b" stroke-width="2" marker-end="url(#arr11)"/>
+    <line x1="400" y1="70" x2="610" y2="120" stroke="#64748b" stroke-width="2" marker-end="url(#arr11)"/>
+    <line x1="400" y1="70" x2="760" y2="120" stroke="#64748b" stroke-width="2" marker-end="url(#arr11)"/>
+
+    <rect x="40" y="240" width="180" height="120" rx="8" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="130" y="262" text-anchor="middle" font-size="11" font-weight="bold" fill="#1e293b">什么都不用做</text>
+    <text x="130" y="280" text-anchor="middle" font-size="11" fill="#1e293b">langchain4j-open-ai</text>
+    <text x="130" y="298" text-anchor="middle" font-size="11" fill="#1e293b">默认 JdkHttpClient</text>
+    <text x="130" y="320" text-anchor="middle" font-size="10" fill="#64748b">简单调用 / 学习 /</text>
+    <text x="130" y="336" text-anchor="middle" font-size="10" fill="#64748b">本地 demo</text>
+
+    <rect x="240" y="240" width="180" height="120" rx="8" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="330" y="262" text-anchor="middle" font-size="11" font-weight="bold" fill="#1e293b">langchain4j-...spring-...</text>
+    <text x="330" y="280" text-anchor="middle" font-size="11" fill="#1e293b">自动用 SpringRestClient</text>
+    <text x="330" y="298" text-anchor="middle" font-size="11" fill="#1e293b">想自定义 RestClient?</text>
+    <text x="330" y="320" text-anchor="middle" font-size="10" fill="#64748b">→ RestClient.builder()</text>
+    <text x="330" y="336" text-anchor="middle" font-size="10" fill="#64748b">→ SpringRestClient.builder()</text>
+
+    <rect x="440" y="240" width="180" height="120" rx="8" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="530" y="262" text-anchor="middle" font-size="11" font-weight="bold" fill="#1e293b">加 langchain4j-</text>
+    <text x="530" y="280" text-anchor="middle" font-size="11" fill="#1e293b">http-client-apache</text>
+    <text x="530" y="298" text-anchor="middle" font-size="11" fill="#1e293b">完整连接池 / 代理 / SSL</text>
+    <text x="530" y="320" text-anchor="middle" font-size="10" fill="#64748b">→ HttpClients.custom()</text>
+    <text x="530" y="336" text-anchor="middle" font-size="10" fill="#64748b">→ ApacheHttpClient.builder()</text>
+
+    <rect x="640" y="240" width="140" height="120" rx="8" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="710" y="262" text-anchor="middle" font-size="11" font-weight="bold" fill="#1e293b">加 langchain4j-</text>
+    <text x="710" y="280" text-anchor="middle" font-size="11" fill="#1e293b">http-client-okhttp</text>
+    <text x="710" y="298" text-anchor="middle" font-size="11" fill="#1e293b">拦截器 / Android</text>
+    <text x="710" y="320" text-anchor="middle" font-size="10" fill="#64748b">→ OkHttpClient.Builder</text>
+    <text x="710" y="336" text-anchor="middle" font-size="10" fill="#64748b">→ OkHttpClient.builder()</text>
+
+    <line x1="190" y1="180" x2="130" y2="240" stroke="#64748b" stroke-width="2" marker-end="url(#arr11)"/>
+    <line x1="400" y1="180" x2="330" y2="240" stroke="#64748b" stroke-width="2" marker-end="url(#arr11)"/>
+    <line x1="610" y1="180" x2="530" y2="240" stroke="#64748b" stroke-width="2" marker-end="url(#arr11)"/>
+    <line x1="760" y1="180" x2="710" y2="240" stroke="#64748b" stroke-width="2" marker-end="url(#arr11)"/>
+
+    <rect x="100" y="400" width="600" height="60" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="400" y="425" text-anchor="middle" font-size="12" font-weight="bold" fill="#92400e">⚠️ 模块优先级(classpath 探测)</text>
+    <text x="400" y="445" text-anchor="middle" font-size="11" fill="#92400e">classpath 同时有多个 http-client-xxx 模块 → LangChain4j 按内置顺序选。明确指定用 .httpClientBuilder()</text>
+  </svg>
+
+  <h2>8. 4 个 Builder 速查表</h2>
+  <table>
+    <thead>
+      <tr><th>实现</th><th>LangChain4j 入口</th><th>接收的 Builder</th><th>关键方法</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>JdkHttpClient</td><td><code>JdkHttpClient.builder()</code></td><td><code>java.net.http.HttpClient.Builder</code></td><td><code>.sslContext(...)</code> <code>.connectTimeout(...)</code></td></tr>
+      <tr><td>SpringRestClient</td><td><code>SpringRestClient.builder()</code></td><td><code>org.springframework.web.client.RestClient.Builder</code></td><td><code>.requestFactory(...)</code> <code>.messageConverters(...)</code></td></tr>
+      <tr><td>ApacheHttpClient</td><td><code>ApacheHttpClient.builder()</code></td><td><code>org.apache.hc.client5.http.impl.classic.HttpClientBuilder</code></td><td><code>.setConnectionManager(...)</code> <code>.setDefaultRequestConfig(...)</code></td></tr>
+      <tr><td>OkHttpClient</td><td><code>OkHttpClient.builder()</code></td><td><code>okhttp3.OkHttpClient.Builder</code></td><td><code>.proxy(...)</code> <code>.addInterceptor(...)</code> <code>.sslSocketFactory(...)</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout info">
+    <p><strong>模式统一</strong>:无论用哪个,都是 <code>HttpClientBuilder</code> SPI 注入 <code>OpenAiChatModel.builder().httpClientBuilder(自己的Builder)</code>。LangChain4j 不关心你底层用啥,只调 <code>HttpClient.execute()</code>。</p>
+  </div>
+
+  <h2>9. 完整可运行示例(代理场景)</h2>
+  <p>内网部署 + 走公司代理 → 用 OkHttp + 代理配置:</p>
+  <pre><code><span class="kw">import</span> okhttp3.*;
+<span class="kw">import</span> java.net.InetSocketAddress;
+<span class="kw">import</span> java.net.Proxy;
+<span class="kw">import</span> java.util.concurrent.TimeUnit;
+
+<span class="kw">public class</span> <span class="ty">ProxiedAiExample</span> {
+
+    <span class="kw">public static void</span> <span class="fn">main</span>(<span class="ty">String</span>[] args) {
+
+        <span class="cm">// 1. 配置代理</span>
+        <span class="ty">Proxy</span> proxy = <span class="kw">new</span> <span class="ty">Proxy</span>(<span class="ty">Proxy</span>.<span class="ty">Type</span>.HTTP,
+                <span class="kw">new</span> <span class="ty">InetSocketAddress</span>(<span class="st">"proxy.internal.corp"</span>, <span class="nm">8080</span>));
+
+        <span class="cm">// 2. OkHttp Builder 加代理 + 认证</span>
+        <span class="ty">String</span> proxyAuth = <span class="st">"Basic "</span> + <span class="ty">Base64</span>.<span class="fn">getEncoder</span>().<span class="fn">encodeToString</span>(
+            (<span class="st">"user:pass"</span>).<span class="fn">getBytes</span>());
+        <span class="ty">OkHttpClient</span>.<span class="ty">Builder</span> okBuilder = <span class="kw">new</span> <span class="ty">OkHttpClient</span>.<span class="ty">Builder</span>()
+            .<span class="fn">proxy</span>(proxy)
+            .<span class="fn">proxyAuthenticator</span>((route, response) -&gt;
+                response.<span class="fn">request</span>().<span class="fn">newBuilder</span>()
+                    .<span class="fn">header</span>(<span class="st">"Proxy-Authorization"</span>, proxyAuth)
+                    .<span class="fn">build</span>())
+            .<span class="fn">connectTimeout</span>(<span class="nm">10</span>, <span class="ty">TimeUnit</span>.SECONDS)
+            .<span class="fn">readTimeout</span>(<span class="nm">60</span>, <span class="ty">TimeUnit</span>.SECONDS);
+
+        <span class="cm">// 3. 包成 LangChain4j 的 Builder</span>
+        <span class="ty">OkHttpClientBuilder</span> lcBuilder = <span class="ty">OkHttpClient</span>.<span class="fn">builder</span>()
+            .<span class="fn">okHttpClientBuilder</span>(okBuilder);
+
+        <span class="cm">// 4. 注入 ChatModel</span>
+        <span class="ty">ChatModel</span> model = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+            .<span class="fn">httpClientBuilder</span>(lcBuilder)
+            .<span class="fn">apiKey</span>(<span class="ty">System</span>.<span class="fn">getenv</span>(<span class="st">"OPENAI_API_KEY"</span>))
+            .<span class="fn">modelName</span>(<span class="st">"gpt-4o-mini"</span>)
+            .<span class="fn">build</span>();
+
+        <span class="cm">// 5. 正常使用</span>
+        <span class="ty">String</span> answer = model.<span class="fn">chat</span>(<span class="st">"Hello via corporate proxy!"</span>);
+        <span class="ty">System</span>.out.<span class="fn">println</span>(answer);
+    }
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>10. 5 个真实避坑</h2>
+
+  <div class="callout warn">
+    <p><strong>避坑 1:依赖要加对模块</strong></p>
+    <p>想用 Apache HttpClient → 必须加 <code>langchain4j-http-client-apache</code>。只加 <code>langchain4j-open-ai</code> 默认只有 JDK。</p>
+    <p>症状:运行时 <code>NoClassDefFoundError: HttpClientBuilder</code>。</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>避坑 2:httpClientBuilder() 是 SPI,不是 JDK 的 Builder</strong></p>
+    <p>传错对象类型 → <code>ClassCastException</code>。记住套路:每个实现都包一层(<code>JdkHttpClient.builder().httpClientBuilder(jdkBuilder)</code>、<code>ApacheHttpClient.builder().httpClientBuilder(apacheBuilder)</code> ...)。</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>避坑 3:Spring Boot starter 自动选了,自己可能不知道</strong></p>
+    <p>用 <code>langchain4j-open-ai-spring-boot-starter</code> → <strong>默认 SpringRestClient</strong>,不是 JDK。想换 Apache 要在 classpath 加 <code>langchain4j-http-client-apache</code>(优先级不同,看 LangChain4j 内部选择逻辑)。</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>避坑 4:OkHttp 拦截器 vs HttpClient 拦截器不一样</strong></p>
+    <p>OkHttp 有 <code>Interceptor</code>(应用层)和 <code>NetworkInterceptor</code>(网络层)。重试逻辑放应用层,日志放网络层(能看到 wire-level 数据)。LangChain4j 内部会加自己的拦截器,你加的在它之前。</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>避坑 5:代理只对 LLM API 生效</strong></p>
+    <p>自定义 HTTP 客户端<strong>只影响 LangChain4j 调 LLM 的请求</strong>,不影响你项目里其他地方的网络调用。配置后记得测试:</p>
+    <pre><code><span class="ty">String</span> answer = model.<span class="fn">chat</span>(<span class="st">"Hello"</span>);  <span class="cm">// 看是否走代理,看日志 / Wireshark</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+  </div>
+
+  <h2>11. 记忆口诀</h2>
+  <blockquote style="border-left:4px solid #f59e0b;padding:12px 20px;background:#fffbeb;border-radius:4px;margin:20px 0">
+    <strong>🎯 HTTP 客户端四选一</strong>:<br>
+    <strong>JDK</strong>(默认零依赖)/ <strong>Spring RestClient</strong>(Boot 集成)/ <strong>Apache</strong>(企业级池)/ <strong>OkHttp</strong>(轻量 + Android)<br>
+    切法统一:<code>{实现}.builder().httpClientBuilder(自己的Builder)</code> → 注入 <code>OpenAiChatModel.builder()</code><br>
+    代理 / SSL / 超时 都在<strong>原生 Builder</strong>里配,LangChain4j 不二次包装
+  </blockquote>
+
+  <h2>12. 与 ch10 的衔接</h2>
+  <ul>
+    <li>ch10 Spring Boot starter 默认给你 <code>SpringRestClient</code> —— 想换底层就是本章</li>
+    <li>多模型时,每个 model 可注入<strong>不同</strong> httpClientBuilder</li>
+    <li>高级特性:代理 / 自签证书 / mTLS 在企业内网场景<strong>几乎必备</strong></li>
+  </ul>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 高级篇 · ch11 v1 浅版 · 源:<code>Customizable HTTP Client _ LangChain4j.html</code>(1.4MB / 4 代码块 / 4746 字)</p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LangChain4j 教程 · 基础篇 9 章 + 高级篇 10 章</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">📚 基础篇 + 高级篇 · 由浅到深 · Java 工程师的 LLM 入门</span>
+    <h1><span class="num">LangChain4j</span> Java 工程师的 LLM 全栈教程 19 章</h1>
+    <p class="lead">
+      本教程基于 LangChain4j 官方文档 19 个章节提炼,分两篇:
+      <strong>基础篇 9 章</strong>(小白入门 · 底层 API + 门面工具) + <strong>高级篇 10 章</strong>(企业级 · Spring Boot / RAG / Agents / MCP / 护栏 / 监控)。
+      每章包含:业务痛点 + 核心 API + 实战代码 + 决策树 + 避坑指南。
+      全部内容严格来自官方资料,绝无 Spring AI 知识混入。
+    </p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="intro">
+    <h2>🗺️ 知识地图(19 章 1 张图)</h2>
+    <div class="svg-box">
+      <svg viewBox="0 0 900 480" xmlns="http://www.w3.org/2000/svg">
+        <!-- 中心 -->
+        <circle cx="450" cy="240" r="60" fill="#2f6feb" stroke="#1e54d4" stroke-width="2"/>
+        <text x="450" y="235" text-anchor="middle" font-size="14" font-weight="700" fill="white">ChatModel</text>
+        <text x="450" y="253" text-anchor="middle" font-size="11" fill="white">入口接口</text>
+
+        <!-- 基础篇 9 节点(蓝色系) -->
+        <line x1="395" y1="225" x2="240" y2="80" stroke="#94a3b8" stroke-width="1" stroke-dasharray="2,2"/>
+        <line x1="395" y1="240" x2="120" y2="240" stroke="#94a3b8" stroke-width="1" stroke-dasharray="2,2"/>
+        <line x1="395" y1="255" x2="240" y2="400" stroke="#94a3b8" stroke-width="1" stroke-dasharray="2,2"/>
+        <line x1="450" y1="180" x2="450" y2="80" stroke="#94a3b8" stroke-width="1" stroke-dasharray="2,2"/>
+        <line x1="450" y1="180" x2="660" y2="80" stroke="#94a3b8" stroke-width="1" stroke-dasharray="2,2"/>
+        <line x1="450" y1="300" x2="450" y2="400" stroke="#94a3b8" stroke-width="1" stroke-dasharray="2,2"/>
+        <line x1="450" y1="300" x2="660" y2="400" stroke="#94a3b8" stroke-width="1" stroke-dasharray="2,2"/>
+
+        <!-- 高级篇 10 节点(琥珀/紫色系) -->
+        <line x1="510" y1="225" x2="820" y2="100" stroke="#f59e0b" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="510" y1="240" x2="820" y2="240" stroke="#f59e0b" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="510" y1="255" x2="820" y2="380" stroke="#f59e0b" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="450" y1="300" x2="280" y2="120" stroke="#8b5cf6" stroke-width="1" stroke-dasharray="3,3"/>
+
+        <!-- 基础篇节点 -->
+        <rect x="160" y="62" width="160" height="40" rx="6" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+        <text x="240" y="80" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">ch01 Chat and LM</text>
+        <text x="240" y="95" text-anchor="middle" font-size="9" fill="#64748b">底层 API</text>
+
+        <rect x="40" y="220" width="160" height="40" rx="6" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+        <text x="120" y="238" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">ch02 Chat Memory</text>
+        <text x="120" y="253" text-anchor="middle" font-size="9" fill="#64748b">多轮对话</text>
+
+        <rect x="160" y="380" width="160" height="40" rx="6" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+        <text x="240" y="398" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">ch03 Parameters</text>
+        <text x="240" y="413" text-anchor="middle" font-size="9" fill="#64748b">参数调优</text>
+
+        <rect x="370" y="62" width="160" height="40" rx="6" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+        <text x="450" y="80" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">ch04 Streaming</text>
+        <text x="450" y="95" text-anchor="middle" font-size="9" fill="#64748b">TokenStream</text>
+
+        <rect x="580" y="62" width="160" height="40" rx="6" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+        <text x="660" y="80" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">ch05 AI Services</text>
+        <text x="660" y="95" text-anchor="middle" font-size="9" fill="#64748b">门面接口</text>
+
+        <rect x="370" y="380" width="160" height="40" rx="6" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+        <text x="450" y="398" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">ch06 Tools</text>
+        <text x="450" y="413" text-anchor="middle" font-size="9" fill="#64748b">@Tool 调用</text>
+
+        <rect x="580" y="380" width="160" height="40" rx="6" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+        <text x="660" y="398" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">ch07 Output</text>
+        <text x="660" y="413" text-anchor="middle" font-size="9" fill="#64748b">结构化输出</text>
+
+        <rect x="200" y="100" width="160" height="40" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+        <text x="280" y="118" text-anchor="middle" font-size="12" font-weight="600" fill="#1e40af">ch08 Classify</text>
+        <text x="280" y="133" text-anchor="middle" font-size="9" fill="#64748b">文本分类</text>
+
+        <rect x="200" y="180" width="160" height="40" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+        <text x="280" y="198" text-anchor="middle" font-size="12" font-weight="600" fill="#1e40af">ch09 Image</text>
+        <text x="280" y="213" text-anchor="middle" font-size="9" fill="#64748b">多模态图像</text>
+
+        <!-- 高级篇节点(琥珀色系) -->
+        <rect x="740" y="80" width="140" height="40" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+        <text x="810" y="98" text-anchor="middle" font-size="12" font-weight="600" fill="#92400e">ch10 Spring Boot</text>
+        <text x="810" y="113" text-anchor="middle" font-size="9" fill="#92400e">企业集成</text>
+
+        <rect x="740" y="220" width="140" height="40" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+        <text x="810" y="238" text-anchor="middle" font-size="12" font-weight="600" fill="#92400e">ch11 HTTP Client</text>
+        <text x="810" y="253" text-anchor="middle" font-size="9" fill="#92400e">底层网络</text>
+
+        <rect x="740" y="360" width="140" height="40" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+        <text x="810" y="378" text-anchor="middle" font-size="12" font-weight="600" fill="#92400e">ch12 Logging</text>
+        <text x="810" y="393" text-anchor="middle" font-size="9" fill="#92400e">日志门面</text>
+
+        <!-- 高级篇节点(紫色系 - 高级特性) -->
+        <rect x="580" y="430" width="140" height="32" rx="6" fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.5"/>
+        <text x="650" y="448" text-anchor="middle" font-size="10" font-weight="600" fill="#5b21b6">ch13~19 高级</text>
+        <text x="650" y="458" text-anchor="middle" font-size="8" fill="#5b21b6">RAG/Agents/MCP</text>
+      </svg>
+    </div>
+    <p class="legend">
+      <span class="leg-item"><span class="dot" style="background:#2f6feb"></span>基础篇 9 章(蓝)</span>
+      <span class="leg-item"><span class="dot" style="background:#f59e0b"></span>高级篇首批(琥珀)</span>
+      <span class="leg-item"><span class="dot" style="background:#8b5cf6"></span>高级篇续作(紫)</span>
+    </p>
+  </div>
+
+  <h2>📚 基础篇 9 章目录(小白入门)</h2>
+  <div class="chapters-grid">
+    <div class="card">
+      <div class="emoji">💬</div>
+      <h4><a href="chapter-01-chat-and-language-models.html">ch01 · Chat and Language Models</a></h4>
+      <p>ChatModel 接口 · 9 个方法签名 · chat / chatAsync 入门</p>
+    </div>
+    <div class="card">
+      <div class="emoji">🧠</div>
+      <h4><a href="chapter-02-chat-memory.html">ch02 · Chat Memory</a></h4>
+      <p>多轮对话 · MessageWindow + TokenWindow + 持久化</p>
+    </div>
+    <div class="card">
+      <div class="emoji">🎛️</div>
+      <h4><a href="chapter-03-model-parameters.html">ch03 · Model Parameters</a></h4>
+      <p>temperature / topP / maxTokens · Builder / 配置</p>
+    </div>
+    <div class="card">
+      <div class="emoji">🌊</div>
+      <h4><a href="chapter-04-response-streaming.html">ch04 · Response Streaming</a></h4>
+      <p>TokenStream · 4 钩子 + lambda + 取消</p>
+    </div>
+    <div class="card">
+      <div class="emoji">🚪</div>
+      <h4><a href="chapter-05-ai-services.html">ch05 · AI Services</a></h4>
+      <p>门面 · 6 注解 + MemoryId + Router Agent</p>
+    </div>
+    <div class="card">
+      <div class="emoji">🔧</div>
+      <h4><a href="chapter-06-tools.html">ch06 · Tools (Function Calling)</a></h4>
+      <p>@Tool 注解 · ToolSpecification · 让 LLM 调你的 Java 方法</p>
+    </div>
+    <div class="card">
+      <div class="emoji">📦</div>
+      <h4><a href="chapter-07-structured-outputs.html">ch07 · Structured Outputs</a></h4>
+      <p>JSON Schema 约束 · ResponseFormat · POJO 映射</p>
+    </div>
+    <div class="card">
+      <div class="emoji">🏷️</div>
+      <h4><a href="chapter-08-classification.html">ch08 · Classification</a></h4>
+      <p>文本分类 · Few-shot 学习 · 标签枚举</p>
+    </div>
+    <div class="card">
+      <div class="emoji">🖼️</div>
+      <h4><a href="chapter-09-image-models.html">ch09 · Image Models</a></h4>
+      <p>多模态图像 · ImageModel · 视觉问答</p>
+    </div>
+  </div>
+
+  <h2>🚀 高级篇 10 章目录(企业级 · 建设中)</h2>
+  <p class="lead-small">基础篇吃透后,进入企业级特性:Spring Boot 集成、自定义 HTTP、JSON 序列化、RAG、Agents、MCP、Guardrails、Observability、Skills。</p>
+  <div class="chapters-grid">
+    <div class="card ready">
+      <div class="emoji">🌱</div>
+      <h4><a href="chapter-10-spring-boot-integration.html">ch10 · Spring Boot Integration</a></h4>
+      <p>Starter 依赖 · 自动装配 · @AiService · 显式 EXPLICIT · Flux</p>
+    </div>
+    <div class="card ready">
+      <div class="emoji">🌐</div>
+      <h4><a href="chapter-11-customizable-http-client.html">ch11 · Customizable HTTP Client</a></h4>
+      <p>JDK / Spring / Apache / OkHttp 4 种 HttpClient SPI</p>
+    </div>
+    <div class="card ready">
+      <div class="emoji">📝</div>
+      <h4><a href="chapter-12-logging.html">ch12 · Logging</a></h4>
+      <p>SLF4J 门面 · 3 开关 · 3 集成 · MDC 链路 · 脱敏 · 异步</p>
+    </div>
+    <div class="card ready">
+      <div class="emoji">🔄</div>
+      <h4><a href="chapter-13-json-codec.html">ch13 · JSON Codec</a></h4>
+      <p>JsonCodecFactory SPI · Gson · 自定义 Jackson · 多态 · 5 避坑</p>
+    </div>
+    <div class="card ready">
+      <div class="emoji">📚</div>
+      <h4><a href="chapter-14-rag.html">ch14 · RAG</a></h4>
+      <p>3 种 RAG 风格 · 5 大 Advanced 组件 · 15+ 向量库选型 · 10 避坑</p>
+    </div>
+    <div class="card ready">
+      <div class="emoji">🤖</div>
+      <h4><a href="chapter-15-agents-and-agentic-ai.html">ch15 · Agents and Agentic AI</a></h4>
+      <p>8 大工作流模式 · AgenticScope · Supervisor/HITL/Voting · 10 避坑</p>
+    </div>
+    <div class="card ready">
+      <div class="emoji">🔌</div>
+      <h4><a href="chapter-16-mcp.html">ch16 · MCP</a></h4>
+      <p>5 种 Transport · Client · Provider · Resources · Registry · USB-C 类比</p>
+    </div>
+    <div class="card ready">
+      <div class="emoji">🛡️</div>
+      <h4><a href="chapter-17-guardrails.html">ch17 · Guardrails</a></h4>
+      <p>InputGuardrail · OutputGuardrail · 4+2 Outcome · retry/reprompt · 5 避坑</p>
+    </div>
+    <div class="card ready">
+      <div class="emoji">📊</div>
+      <h4><a href="chapter-18-observability.html">ch18 · Observability</a></h4>
+      <p>8 事件 · 5 Listener · OpenTelemetry · Micrometer · Langfuse · 5 避坑</p>
+    </div>
+    <div class="card ready">
+      <div class="emoji">🎁</div>
+      <h4><a href="chapter-19-skills.html">ch19 · Skills</a></h4>
+      <p>SKILL.md · activate_skill · 工具模式 · 技能范围工具 · Shell 模式 · 5 避坑</p>
+    </div>
+  </div>
+
+  <h2>🦜 langGraph4j 篇 7 章目录(图工作流 · 已收官)</h2>
+    <p class="lead-small">LangChain4j 的兄弟项目 <strong>langgraph4j</strong> —— Java 版 LangGraph,把"图工作流"能力完整搬到 JVM。7 章覆盖:核心库 / 子图 / 并行分支 / 流式传输 / 钩子 / 取消 / 检查点。</p>
+    <div class="chapters-grid">
+      <div class="card ready">
+        <div class="emoji">🦜</div>
+        <h4><a href="langgraph4j-chapter-01-core.html">lg01 · 核心库</a></h4>
+        <p>StateGraph · AgentState · Node · Edge · compile().execute() 同步流</p>
+      </div>
+      <div class="card ready">
+        <div class="emoji">🪆</div>
+        <h4><a href="langgraph4j-chapter-02-subgraphs.html">lg02 · 子图</a></h4>
+        <p>嵌套图 · 3 种形式(图/编译图/节点操作)· 状态隔离</p>
+      </div>
+      <div class="card ready">
+        <div class="emoji">🌿</div>
+        <h4><a href="langgraph4j-chapter-03-parallel-branches.html">lg03 · 并行分支</a></h4>
+        <p>条件边 · branch / ConditionalEdgeBuilder · 多路由并行</p>
+      </div>
+      <div class="card ready">
+        <div class="emoji">🌊</div>
+        <h4><a href="langgraph4j-chapter-04-streaming.html">lg04 · 流式传输</a></h4>
+        <p>AsyncGenerator + StreamingChatGenerator + SpringStreamingChatGenerator</p>
+      </div>
+      <div class="card ready">
+        <div class="emoji">🪝</div>
+        <h4><a href="langgraph4j-chapter-05-hooks.html">lg05 · 钩子</a></h4>
+        <p>NodeHook × EdgeHook × 3 时机(Before / After / Wrap)· 全局 + ID 特定</p>
+      </div>
+      <div class="card ready">
+        <div class="emoji">🛑</div>
+        <h4><a href="langgraph4j-chapter-06-cancellation.html">lg06 · 取消</a></h4>
+        <p>cancel(true/false) × forEachAsync / for-each × 子图传播</p>
+      </div>
+      <div class="card ready">
+        <div class="emoji">💾</div>
+        <h4><a href="langgraph4j-chapter-07-checkpoints.html">lg07 · 检查点</a></h4>
+        <p>PostgresSaver × getStateHistory × lastStateOf × 时间旅行</p>
+      </div>
+    </div>
+
+    <h2>🗓️ 推荐学习路径</h2>
+  <table class="dir-table">
+    <thead>
+      <tr>
+        <th>批次</th>
+        <th>章节</th>
+        <th>主题</th>
+        <th>建议耗时</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background:rgba(47,111,235,0.05)">
+        <td class="num">基础 1</td>
+        <td>ch01 + ch02 + ch03</td>
+        <td>底层 API + 多轮对话 + 参数调优(入门三件套)</td>
+        <td>2-3 小时</td>
+      </tr>
+      <tr style="background:rgba(224,122,59,0.05)">
+        <td class="num">基础 2</td>
+        <td>ch04 + ch05</td>
+        <td>流式输出 + 门面接口(进阶两步)</td>
+        <td>1.5-2 小时</td>
+      </tr>
+      <tr style="background:rgba(22,163,74,0.05)">
+        <td class="num">基础 3</td>
+        <td>ch06 + ch07</td>
+        <td>工具调用 + 结构化输出(LLM 能力上限)</td>
+        <td>1.5-2 小时</td>
+      </tr>
+      <tr style="background:rgba(47,111,235,0.05)">
+        <td class="num">基础 4</td>
+        <td>ch08 + ch09</td>
+        <td>分类 + 图像(收官小工具)</td>
+        <td>1-1.5 小时</td>
+      </tr>
+      <tr style="background:rgba(245,158,11,0.08)">
+        <td class="num">高级 1</td>
+        <td>ch10 + ch11</td>
+        <td>Spring Boot 集成 + HTTP 客户端(企业入门) ✅</td>
+        <td>1.5-2 小时</td>
+      </tr>
+      <tr style="background:rgba(139,92,246,0.06)">
+        <td class="num">高级 2</td>
+        <td>ch12 ✅ + ch13 ✅</td>
+        <td>日志 + JSON Codec(已交付 · 小工具组合收官)</td>
+        <td>1-1.5 小时</td>
+      </tr>
+      <tr style="background:rgba(245,158,11,0.08)">
+        <td class="num">高级 3</td>
+        <td>ch14 ✅</td>
+        <td>RAG 检索增强(企业核心 · 已交付)</td>
+        <td>2-3 小时</td>
+      </tr>
+      <tr style="background:rgba(139,92,246,0.06)">
+        <td class="num">高级 4</td>
+        <td>ch15 ✅ + ch16 ✅</td>
+        <td>Agents + MCP(双核 · 已交付)</td>
+        <td>2-3 小时</td>
+      </tr>
+      <tr style="background:rgba(239,68,68,0.05)">
+        <td class="num">高级 5</td>
+        <td>ch17 ✅ + ch18 ✅ + ch19 ✅</td>
+        <td>护栏 + 监控 + Skills(均已交付 · 实验性 API · 🎉 高级篇收官)</td>
+        <td>2-2.5 小时</td>
+      </tr>
+      <tr style="background:rgba(13,148,136,0.06)">
+        <td class="num">延展 1</td>
+        <td>lg01 ~ lg07</td>
+        <td>langGraph4j 图工作流 7 章(均已交付 · 🎉 收官)</td>
+        <td>2-2.5 小时</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout info">
+    <p><strong>📌 重要约定</strong></p>
+    <ul>
+      <li><strong>本教程不与 Spring AI 教程混搭</strong>。内容仅来自 <code>E:\hermes_chat\langchain4j-html\</code> 下 19 个官方 HTML。</li>
+      <li><strong>基础篇 9 章 + 高级篇 10 章 = 19 章全官方覆盖</strong>(高级篇 ch14-19 还在持续建设中)。</li>
+      <li>代码示例优先 OpenAI / 通义千问(Qwen) / 智谱 GLM 三个厂商,本地可零成本跑通。</li>
+      <li>每章末尾的"避坑"段落汇总自官方文档的<em>注意 / 提示 / 警告</em>块。</li>
+      <li>每章末尾有"记忆口诀",方便你长期记忆 API 特征。</li>
+    </ul>
+  </div>
+
+
+</div>
+</main>
+
+<footer>
+  <p>LangChain4j 教程 · 基础篇 9 章 + 高级篇 10 章 · langGraph4j 篇 7 章(均已交付)· 内容来源:官方文档 19 + 7 个 HTML · 不含任何 Spring AI 内容</p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+
+</body>
+</html>

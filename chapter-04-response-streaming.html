@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch04 · Response Streaming · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">流式输出 · 打字机效果</span>
+    <h1><span class="num">04</span>Response Streaming(响应流式)</h1>
+    <p class="lead">LLM <strong>一个 token 一个 token 吐</strong>。等全生成完再返回,用户要等 5-10 秒。<code>StreamingChatModel</code> + <code>StreamingChatResponseHandler</code> 让你<strong>逐 token 回调</strong>,前端能"打字机"实时显示。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:<code>StreamingChatModel</code> 是 <code>ChatModel</code> 的"流式兄弟",API 几乎一样,只是返回用 <code>StreamingChatResponseHandler</code> 回调而不是字符串。适合"长答案 + 实时展示"场景。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>老板:"为什么我的 AI 客服每次回答都要等 8 秒才出?用户都跑了。"</p>
+  <p>根因:你用的是 <code>chatModel.chat(msg)</code>,<strong>整段生成完才返回</strong>。但 LLM 实际是 token-by-token 输出的,前 200ms 第一个字就出来了。</p>
+  <p>流式方案:换 <code>StreamingChatModel</code>,每出一个 token 就<strong>立刻推到前端</strong>,用户看到的是"打字机效果",感知延迟从 8 秒变成 200ms。</p>
+
+  <h3>3 个真实场景</h3>
+  <ul>
+    <li><strong>AI 客服实时回复</strong> — 用户问完不用干等,模型"边想边写"</li>
+    <li><strong>长文写作助手</strong> — 写 2000 字营销文案,逐段显示不焦虑</li>
+    <li><strong>代码生成</strong> — Copilot 类工具,逐 token 推送到 IDE 编辑器</li>
+  </ul>
+
+  <h2>2. 核心概念</h2>
+  <p>流式和普通调用的对应关系:</p>
+  <table>
+    <thead>
+      <tr><th>普通(阻塞)</th><th>流式(回调)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>ChatModel</code></td><td><code>StreamingChatModel</code></td></tr>
+      <tr><td><code>LanguageModel</code></td><td><code>StreamingLanguageModel</code></td></tr>
+      <tr><td><code>String chat(String)</code> 同步返回</td><td><code>void chat(msg, handler)</code> 逐 token 回调</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 极简调用(打字机效果)</h2>
+  <p>完整版 <code>StreamingChatResponseHandler</code> + 4 个 default 回调:</p>
+  <pre><code><span class="ty">StreamingChatModel</span> model = <span class="ty">OpenAiStreamingChatModel</span>.<span class="fn">builder</span>()
+        .<span class="fn">apiKey</span>(<span class="ty">System</span>.<span class="fn">getenv</span>(<span class="st">"OPENAI_API_KEY"</span>))
+        .<span class="fn">modelName</span>(<span class="st">"gpt-4o-mini"</span>)
+        .<span class="fn">build</span>();
+
+<span class="ty">String</span> userMessage = <span class="st">"Tell me a joke"</span>;
+model.<span class="fn">chat</span>(userMessage, <span class="kw">new</span> <span class="ty">StreamingChatResponseHandler</span>() {
+    <span class="at">@Override</span>
+    <span class="kw">public void</span> <span class="fn">onPartialResponse</span>(<span class="ty">String</span> partialResponse) {
+        <span class="ty">System</span>.<span class="fn">out</span>.<span class="fn">print</span>(partialResponse);   <span class="cm">// 每个 token 立即打印</span>
+    }
+    <span class="at">@Override</span>
+    <span class="kw">public void</span> <span class="fn">onCompleteResponse</span>(<span class="ty">ChatResponse</span> completeResponse) {
+        <span class="ty">System</span>.<span class="fn">out</span>.<span class="fn">println</span>(<span class="st">"\n[done]"</span>);
+    }
+    <span class="at">@Override</span>
+    <span class="kw">public void</span> <span class="fn">onError</span>(<span class="ty">Throwable</span> error) {
+        error.<span class="fn">printStackTrace</span>();
+    }
+});</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>4. Lambda 简化版(3 行)</h2>
+  <p>99% 场景只需要"打印 token",用官方提供的 lambda 静态方法:</p>
+  <pre><code><span class="kw">import static</span> <span class="ty">dev</span>.langchain4j.model.<span class="ty">LambdaStreamingResponseHandler</span>.*<span class="cm">;</span>
+
+<span class="cm">// 只关心 token:3 行解决</span>
+model.<span class="fn">chat</span>(<span class="st">"Tell me a joke"</span>, <span class="fn">onPartialResponse</span>(<span class="ty">System</span>.out::<span class="fn">print</span>));</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <p>想同时处理错误:</p>
+  <pre><code><span class="cm">// onPartialResponseAndError:2 个回调,partialResponse + error</span>
+model.<span class="fn">chat</span>(<span class="st">"Tell me a joke"</span>,
+    <span class="fn">onPartialResponseAndError</span>(
+        <span class="ty">System</span>.out::<span class="fn">print</span>,           <span class="cm">// token 回调</span>
+        <span class="ty">Throwable</span>::<span class="fn">printStackTrace</span>  <span class="cm">// 异常回调</span>
+    ));</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>5. StreamingChatResponseHandler 完整签名</h2>
+  <p>官方接口有 4 个 default 方法,按触发顺序:</p>
+  <pre><code><span class="kw">public interface</span> <span class="ty">StreamingChatResponseHandler</span> {
+    <span class="cm">// 1. 每来一个 token 调一次(简单版)</span>
+    <span class="kw">default void</span> <span class="fn">onPartialResponse</span>(<span class="ty">String</span> partialResponse) {}
+
+    <span class="cm">// 2. 每来一个 token 调一次(带上下文,可取消)</span>
+    <span class="kw">default void</span> <span class="fn">onPartialResponse</span>(<span class="ty">PartialResponse</span> partialResponse,
+                                    <span class="ty">PartialResponseContext</span> context) {}
+
+    <span class="cm">// 3. 模型的"思考过程"(o1 / deepseek-r1 这类推理模型)</span>
+    <span class="kw">default void</span> <span class="fn">onPartialThinking</span>(<span class="ty">PartialThinking</span> partialThinking) {}
+
+    <span class="cm">// 4. 完整响应生成完调一次(带元数据:token 用量、finishReason)</span>
+    <span class="kw">default void</span> <span class="fn">onCompleteResponse</span>(<span class="ty">ChatResponse</span> completeResponse) {}
+
+    <span class="cm">// 5. 出错时调</span>
+    <span class="kw">default void</span> <span class="fn">onError</span>(<span class="ty">Throwable</span> error) {}
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>6. 取消流式(用户中途说"算了")</h2>
+  <p>用户看到一半想停?用 <code>PartialResponseContext.streamingHandle().cancel()</code>:</p>
+  <pre><code>model.<span class="fn">chat</span>(userMessage, <span class="kw">new</span> <span class="ty">StreamingChatResponseHandler</span>() {
+    <span class="at">@Override</span>
+    <span class="kw">public void</span> <span class="fn">onPartialResponse</span>(<span class="ty">PartialResponse</span> partial,
+                                    <span class="ty">PartialResponseContext</span> ctx) {
+        <span class="fn">process</span>(partial);
+        <span class="kw">if</span> (<span class="fn">shouldCancel</span>()) {
+            ctx.<span class="fn">streamingHandle</span>().<span class="fn">cancel</span>();   <span class="cm">// 主动断开 HTTP 连接</span>
+        }
+    }
+});</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout tip">
+    <p><strong>💡 实战技巧</strong>:Web 项目里常把"取消"绑到用户点击"停止"按钮。前端发个 signal,后端调 <code>cancel()</code>,立刻断流 + 释放 token 计费。</p>
+  </div>
+
+  <h2>7. 实战:Spring Boot SSE 推送</h2>
+  <p>最常见的"前端打字机"实现 — Spring Boot + Server-Sent Events:</p>
+  <pre><code><span class="at">@GetMapping</span>(value=<span class="st">"/chat/stream"</span>, produces=<span class="ty">MediaType</span>.TEXT_EVENT_STREAM_VALUE)
+<span class="kw">public</span> <span class="ty">SseEmitter</span> <span class="fn">stream</span>(<span class="at">@RequestParam</span> <span class="ty">String</span> msg) {
+    <span class="ty">SseEmitter</span> emitter = <span class="kw">new</span> <span class="ty">SseEmitter</span>(<span class="ty">Long</span>.MAX_VALUE);
+
+    streamingModel.<span class="fn">chat</span>(msg, <span class="kw">new</span> <span class="ty">StreamingChatResponseHandler</span>() {
+        <span class="at">@Override</span>
+        <span class="kw">public void</span> <span class="fn">onPartialResponse</span>(<span class="ty">String</span> token) {
+            <span class="kw">try</span> { emitter.<span class="fn">send</span>(<span class="ty">SseEmitter</span>.<span class="ty">EventBuilder</span>()
+                .<span class="fn">data</span>(token).<span class="fn">build</span>()); }
+            <span class="kw">catch</span> (<span class="ty">IOException</span> e) { emitter.<span class="fn">completeWithError</span>(e); }
+        }
+        <span class="at">@Override</span>
+        <span class="kw">public void</span> <span class="fn">onCompleteResponse</span>(<span class="ty">ChatResponse</span> r) { emitter.<span class="fn">complete</span>(); }
+        <span class="at">@Override</span>
+        <span class="kw">public void</span> <span class="fn">onError</span>(<span class="ty">Throwable</span> e) { emitter.<span class="fn">completeWithError</span>(e); }
+    });
+    <span class="kw">return</span> emitter;
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>8. 选型决策树</h2>
+  <div class="svg-box">
+    <svg viewBox="0 0 720 240" xmlns="http://www.w3.org/2000/svg">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">"我要用普通 chat 还是 Streaming?"</text>
+
+      <rect x="280" y="40" width="160" height="36" rx="8" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+      <text x="360" y="62" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">判断标准</text>
+
+      <line x1="360" y1="76" x2="120" y2="120" stroke="#94a3b8" stroke-width="1"/>
+      <line x1="360" y1="76" x2="600" y2="120" stroke="#94a3b8" stroke-width="1"/>
+
+      <text x="220" y="100" font-size="12" font-weight="600" fill="#15803d">普通 chat</text>
+      <text x="500" y="100" font-size="12" font-weight="600" fill="#b45309">Streaming</text>
+
+      <rect x="40" y="130" width="160" height="80" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+      <text x="120" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">普通 chat</text>
+      <text x="120" y="172" text-anchor="middle" font-size="11" fill="#334155">· 短答案(分类/抽取)</text>
+      <text x="120" y="188" text-anchor="middle" font-size="11" fill="#334155">· 后台批处理</text>
+      <text x="120" y="204" text-anchor="middle" font-size="11" fill="#334155">· 不在乎延迟</text>
+
+      <rect x="520" y="130" width="160" height="80" rx="8" fill="#fff4e6" stroke="#e07a3b" stroke-width="1"/>
+      <text x="600" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#b45309">Streaming</text>
+      <text x="600" y="172" text-anchor="middle" font-size="11" fill="#334155">· 答案 &gt; 200 字</text>
+      <text x="600" y="188" text-anchor="middle" font-size="11" fill="#334155">· 实时 UI 反馈</text>
+      <text x="600" y="204" text-anchor="middle" font-size="11" fill="#334155">· 用户可中途取消</text>
+    </svg>
+  </div>
+
+  <h2>9. 避坑指南</h2>
+
+  <div class="pitfall">
+    <h3>坑 1 · 流式不是"快",是"看起来快"</h3>
+    <p>流式输出的<strong>总耗时和普通调用一样</strong>(甚至略高,因为要频繁回调)。它的价值是"用户感知延迟"从 8 秒变成 200ms。如果你后端批处理,流式没意义。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 2 · token 回调里别做重操作</h3>
+    <p><code>onPartialResponse</code> 一次响应可能被调 <strong>几十到几百次</strong>(每个 token 一次)。在里面查 DB / 发 HTTP / 写日志 = 性能灾难。应该<strong>只做"转发到 SSE / 累加 buffer"</strong>这种轻活。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 3 · 流式是 HTTP 长连接,容易超时</h3>
+    <p>前端 SSE 客户端默认 30s/60s 心跳超时。要在 <code>SseEmitter</code> 里设长 timeout,或者后端定期发心跳(空 comment 帧)保活。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 4 · onError 必须实现,否则异常"消失"</h3>
+    <p><code>StreamingChatResponseHandler</code> 的 <code>onError</code> 是 default 空实现。如果不重写,模型报错时你<strong>什么都不知道</strong>,前端会一直"打字"到客户端超时。永远至少重写 onError 打个日志。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 5 · 部分模型不支持流式</h3>
+    <p>比如老的 <code>gpt-3.5-turbo-instruct</code>(completion 接口)、某些本地 Ollama 小模型。<strong>用之前先查厂商文档</strong>有没有 streaming 端点,没有就老老实实用普通 chat。</p>
+  </div>
+
+  <h2>10. 记忆口诀</h2>
+  <div class="mnemonic">
+    <h3>🎓 4 行口诀</h3>
+    <pre>StreamingModel 是兄弟, 接口一样回调不一样
+四个钩子 partial / complete / error / thinking, lambda 一行 onPartialResponse
+流式不是真快是看起来快, 取消靠 streamingHandle.cancel
+onError 必实现, token 回调里别查库</pre>
+  </div>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 基础篇 · ch04 v1 浅版 · 源:<code>Response Streaming _ LangChain4j.html</code></p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

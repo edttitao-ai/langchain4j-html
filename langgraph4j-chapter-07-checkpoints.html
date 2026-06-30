@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lg07 · 检查点 · LangGraph4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">07</span> 检查点(存档 / 读档 / 时间旅行)</h1>
+    <p class="hero-sub">PostgresSaver × Checkpoint × getStateHistory × lastStateOf × release · 6 业务场景</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<strong>检查点 = graph 状态的持久化存档</strong>。LangGraph4j 提供 <code>PostgresSaver</code>(基于 PostgreSQL)把每个节点执行后的 state 存到 DB;崩了能从最近存档恢复;支持 <code>getStateHistory()</code> 看历史 + <code>lastStateOf()</code> 拿最近一次 + <code>release()</code> 释放线程。<strong>内存缓存</strong>层减少 DB 往返。</p>
+
+<p><strong>核心价值</strong>:长跑 agent 的"游戏存档"机制 —— 进程重启 / 节点失败 / 人想介入修改 state 时都能"读档继续",而不是从头跑浪费 token + 浪费时间。</p>
+
+<div class="svg-box">
+<svg viewBox="0 0 900 280" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;">
+  <defs>
+    <linearGradient id="step07" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="save07" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="db07" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+    <marker id="arr07" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+  <text x="450" y="28" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">检查点工作流(graph → saver → postgres)</text>
+
+  <!-- Graph nodes -->
+  <rect x="40" y="70" width="200" height="45" rx="8" fill="url(#step07)"/>
+  <text x="140" y="98" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">agent_1</text>
+  <rect x="40" y="135" width="200" height="45" rx="8" fill="url(#step07)"/>
+  <text x="140" y="163" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">agent_2</text>
+  <rect x="40" y="200" width="200" height="45" rx="8" fill="url(#step07)"/>
+  <text x="140" y="228" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">agent_3</text>
+
+  <!-- Saver -->
+  <rect x="350" y="100" width="200" height="120" rx="10" fill="none" stroke="url(#save07)" stroke-width="2"/>
+  <text x="450" y="125" text-anchor="middle" fill="#a78bfa" font-size="13" font-weight="600">📦 PostgresSaver</text>
+  <text x="450" y="148" text-anchor="middle" fill="#cbd5e1" font-size="11">每个节点执行后</text>
+  <text x="450" y="168" text-anchor="middle" fill="#cbd5e1" font-size="11">自动 save state</text>
+  <rect x="370" y="180" width="160" height="28" rx="6" fill="#0f172a"/>
+  <text x="450" y="199" text-anchor="middle" fill="#fbbf24" font-size="11">内存缓存(减少 DB 往返)</text>
+
+  <!-- Postgres -->
+  <rect x="660" y="100" width="200" height="120" rx="10" fill="url(#db07)"/>
+  <text x="760" y="125" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">🐘 PostgreSQL</text>
+  <text x="760" y="148" text-anchor="middle" fill="#cbd5e1" font-size="11">lg4j-store 数据库</text>
+  <text x="760" y="168" text-anchor="middle" fill="#cbd5e1" font-size="11">checkpoint 表</text>
+  <text x="760" y="190" text-anchor="middle" fill="#cbd5e1" font-size="10">thread_id / state / timestamp</text>
+  <text x="760" y="208" text-anchor="middle" fill="#94a3b8" font-size="10">16.4+ 推荐</text>
+
+  <!-- Arrows -->
+  <line x1="240" y1="92" x2="350" y2="140" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr07)"/>
+  <line x1="240" y1="157" x2="350" y2="155" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr07)"/>
+  <line x1="240" y1="222" x2="350" y2="170" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr07)"/>
+  <line x1="550" y1="160" x2="660" y2="160" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr07)"/>
+
+  <text x="450" y="265" text-anchor="middle" fill="#64748b" font-size="11">崩了?getStateHistory() → lastStateOf() → 读档继续</text>
+</svg>
+</div>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"用户跟 AI 客服聊到第 5 轮时,服务器 OOM 重启了 —— 用户回来要从头聊,前 4 轮的订单查询 / 物流跟踪结果全没了,用户体验崩。"</p>
+
+<p><strong>解法</strong>:用 <strong>检查点</strong> —— graph 每执行完一个节点就把 state 序列化存到 PostgreSQL,<strong>进程重启后从最近存档恢复</strong>,用户接着第 5 轮聊,不用从头来。</p>
+
+<h3>6 个检查点能解决的事</h3>
+<ul>
+  <li><strong>💾 进程崩溃恢复</strong> — OOM / 部署 / 服务器挂了,重启后从 PostgresSaver 读最近存档继续跑,token 不浪费</li>
+  <li><strong>👤 人介入修改 state</strong> — agent 跑飞了调错工具,人工看一眼 <code>getStateHistory()</code>,改 state 后"读档重跑"</li>
+  <li><strong>⏪ 时间旅行 debug</strong> — 复杂 agent 出问题,看历史每一步 state,定位"哪一步把 state 搞坏了"</li>
+  <li><strong>🔄 长任务断点续跑</strong> — 跑批处理跑一半到下班了,关机明天启动从最近存档继续,不用从 step 1 重跑</li>
+  <li><strong>📊 审计 / 合规</strong> — 金融 / 医疗场景需要每一步决策可追溯,checkpoint history 就是天然审计日志</li>
+  <li><strong>🧪 测试可重现</strong> — 同一 thread_id + 同一输入 = 同一 state history,测试用例可重现</li>
+</ul>
+
+<p><strong>💡 什么时候不需要</strong>:单次简单调用(没状态可存档)/ 内存版 MemorySaver 已经够用(不需要 Postgres)/ 对延迟极敏感(每次 save 多 1-5ms DB 往返)/ state 含敏感数据需加密落盘(额外加密层)。</p>
+
+<h2>2. 核心概念</h2>
+
+<h3>2.1 检查点三件套</h3>
+<table class="compare-table">
+  <thead>
+    <tr><th>要素</th><th>API</th><th>作用</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>存档</td><td><code>CompileConfig.checkpointSaver(saver)</code></td><td>编译时挂上 saver,每个节点自动存档</td></tr>
+    <tr><td>查历史</td><td><code>workflow.getStateHistory(runnableConfig)</code></td><td>返回 <code>List&lt;Checkpoint&gt;</code>,按时间倒序</td></tr>
+    <tr><td>取最近</td><td><code>workflow.lastStateOf(runnableConfig)</code></td><td>返回 <code>Optional&lt;NodeOutput&gt;</code>,最近一次存档</td></tr>
+    <tr><td>释放</td><td><code>saver.release(runnableConfig)</code></td><td>释放该 thread 占用的资源(<code>releaseThread=false</code> 时必须调)</td></tr>
+  </tbody>
+</table>
+
+<h3>2.2 Saver 构建器</h3>
+<pre><code class="language-java">PostgresSaver saver = PostgresSaver.builder()
+    .host("localhost")        // ← DB 地址
+    .port(5432)                // ← DB 端口
+    .user("admin")             // ← 用户名
+    .password("your_password") // ← 密码
+    .database("lg4j-store")    // ← 数据库名
+    .stateSerializer(serializer) // ← state 序列化器(ObjectStreamStateSerializer / JacksonSerializer)
+    .dropTablesFirst(false)    // ← true:启动时先 drop 表(开发用)
+    .createTables(true)        // ← true:启动时自动建表(生产建议手动迁移)
+    .build();</code></pre>
+
+<h3>2.3 编译配置关键开关</h3>
+<table class="compare-table">
+  <thead>
+    <tr><th>配置</th><th>默认值</th><th>作用</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>checkpointSaver(saver)</code></td><td>null(无存档)</td><td>挂上后每个节点执行后自动 save</td></tr>
+    <tr><td><code>releaseThread(true)</code></td><td>true</td><td>true:节点执行完立即释放线程;false:保留线程供 <code>release()</code> 显式释放</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+<p><strong>⚠️ releaseThread 配对使用</strong>:<code>releaseThread(false)</code> 时,<strong>必须显式调 <code>saver.release(runnableConfig)</code></strong> 释放资源,否则线程 / 连接泄漏。常用于"需要异步存档 + 后续手动控制"的场景。</p>
+</div>
+
+<h2>3. 极简调用(4 行存档 + 读档)</h2>
+<p>最小可运行 demo:编译时挂 saver → invoke → 看历史 → 重启后读档:</p>
+
+<pre><code class="language-java">// 1. 初始化 saver
+var saver = PostgresSaver.builder()
+    .host("localhost").port(5432).user("admin").password("xxx").database("lg4j-store")
+    .stateSerializer(new ObjectStreamStateSerializer&lt;&gt;(AgentState::new))
+    .createTables(true)
+    .build();
+
+// 2. 编译时挂存档
+var compileConfig = CompileConfig.builder().checkpointSaver(saver).build();
+var workflow = graph.compile(compileConfig);
+
+// 3. 跑一次,自动存档
+var runnableConfig = RunnableConfig.builder().build();
+workflow.invoke(Map.of("input", "test1"), runnableConfig);  // ← 跑完所有节点,每步存档
+
+// 4. 看历史
+List&lt;Checkpoint&gt; history = workflow.getStateHistory(runnableConfig);
+assertEquals(2, history.size());   // START + agent_1 + END 共 2-3 个 checkpoint
+
+Optional&lt;NodeOutput&gt; last = workflow.lastStateOf(runnableConfig);
+last.ifPresent(s -&gt; {
+    assertEquals("agent_1", s.node());
+    assertEquals(END, s.next());
+});</code></pre>
+
+<h2>4. 检查点完整实战</h2>
+
+<h3>4.1 进程崩溃恢复(核心场景)</h3>
+<pre><code class="language-java">// 场景:agent 跑多步,中间崩了,重启后从最近存档继续
+var stateSerializer = new ObjectStreamStateSerializer&lt;&gt;(AgentState::new);
+
+// ====== 第一次启动:跑一半崩了 ======
+var saver1 = PostgresSaver.builder()
+    .host("localhost").port(5432).user("admin").password("xxx").database("lg4j-store")
+    .stateSerializer(stateSerializer)
+    .createTables(true)
+    .build();
+
+var compileConfig1 = CompileConfig.builder()
+    .checkpointSaver(saver1)
+    .releaseThread(false)   // ← 保留线程,后续手动 release
+    .build();
+var runnableConfig = RunnableConfig.builder().build();
+var workflow1 = graph.compile(compileConfig1);
+
+try {
+    workflow1.invoke(Map.of("input", "test1"), runnableConfig);
+} catch (Exception e) {
+    log.error("中途崩了", e);
+    // 注意:不调 release(),存档已经在 DB 里了
+}
+
+// ====== 服务器重启后:新建 saver,重新 compile,读档继续 ======
+var saver2 = PostgresSaver.builder()
+    .host("localhost").port(5432).user("admin").password("xxx").database("lg4j-store")
+    .stateSerializer(stateSerializer)
+    .build();   // ← createTables=false,因为表已存在
+
+var compileConfig2 = CompileConfig.builder()
+    .checkpointSaver(saver2)
+    .releaseThread(false)
+    .build();
+var workflow2 = graph.compile(compileConfig2);
+
+// 读最近存档 + 历史
+var history = workflow2.getStateHistory(runnableConfig);
+var lastSnapshot = workflow2.lastStateOf(runnableConfig);
+log.info("崩前最后状态: node={}, next={}", lastSnapshot.get().node(), lastSnapshot.get().next());
+
+// 重新 invoke 会从最近存档继续(不是从头跑)
+var result = workflow2.invoke(Map.of("input", "test1"), runnableConfig);
+saver2.release(runnableConfig);   // ← 显式释放</code></pre>
+
+<h3>4.2 时间旅行 debug</h3>
+<pre><code class="language-java">// 场景:agent 跑飞了,看历史每步 state 定位问题
+var history = workflow.getStateHistory(runnableConfig);
+log.info("共 {} 个 checkpoint,按时间倒序:", history.size());
+
+for (int i = 0; i &lt; history.size(); i++) {
+    var cp = history.get(i);
+    log.info("=== [{}] node={}, next={}, state={} ===",
+        i, cp.node(), cp.next(), cp.state().data());
+}
+
+// 输出示例:
+// [0] node=END, next=null, state={input=test1, agent_3:prop=ok}
+// [1] node=agent_3, next=END, state={input=test1, agent_1:prop=..., agent_2:prop=...}
+// [2] node=agent_2, next=agent_3, state={input=test1, agent_1:prop=...}
+// [3] node=agent_1, next=agent_2, state={input=test1}</code></pre>
+
+<h3>4.3 人介入修改 state + 重跑</h3>
+<pre><code class="language-java">// 场景:agent 调错工具把 state 搞坏了,人工改 state 后重跑
+var history = workflow.getStateHistory(runnableConfig);
+var brokenCheckpoint = history.get(1);  // 选第 1 步的状态
+
+// 改 state(比如强制重置某个字段)
+var patchedState = new HashMap&lt;&gt;(brokenCheckpoint.state().data());
+patchedState.put("retry_count", 0);   // ← 重置重试计数
+patchedState.put("manual_override", true);
+
+// 用修改后的 state 重新 invoke
+var patchedInput = new HashMap&lt;String, Object&gt;(patchedState);
+patchedInput.put("input", "test1");
+
+var newRunnableConfig = RunnableConfig.builder().build();
+workflow.invoke(patchedInput, newRunnableConfig);  // ← 从修改后的 state 继续跑</code></pre>
+
+<h2>5. 实战:跨境电商 AI 客服 + 存档恢复(6 业务场景落地)</h2>
+
+<p>跨境电商 AI 客服,用户对话经常跨多次会话(用户问一半走了 / 手机没电了 / 隔天再来)。<strong>存档/读档</strong>是核心刚需 —— 让用户从上次中断的地方继续,不用重复输入订单号 / 物流单号。</p>
+
+<h3>业务场景映射</h3>
+<table class="compare-table">
+  <thead>
+    <tr><th>业务场景</th><th>存档策略</th><th>实现要点</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>💾 OOM 重启恢复</td><td>每节点存档</td><td>PostgresSaver + releaseThread(false) + 启动时读最近存档</td></tr>
+    <tr><td>👤 用户跨天继续对话</td><td>thread_id 关联存档</td><td>runnableConfig.threadId("user-123-session-1") + lastStateOf 读</td></tr>
+    <tr><td>⏪ 客服介入排错</td><td>getStateHistory 时间旅行</td><td>客服后台看每步 state,人工改后重 invoke</td></tr>
+    <tr><td>🔄 长批处理断点续跑</td><td>夜间跑一半关机</td><td>启动时遍历所有 thread_id,从最近存档继续</td></tr>
+    <tr><td>📊 决策审计(合规)</td><td>getStateHistory 全留痕</td><td>每步 state 永久存档,合规审查可拉历史</td></tr>
+    <tr><td>🧪 测试可重现</td><td>同一 thread_id 复现</td><td>测试用例固定 thread_id + 输入,断言 history 内容</td></tr>
+  </tbody>
+</table>
+
+<h3>完整代码</h3>
+<pre><code class="language-java">// ============ 1. 全局 Saver 单例(连接池) ============
+public class CheckpointService {
+    private final PostgresSaver saver;
+
+    public CheckpointService(DataSource ds) {
+        this.saver = PostgresSaver.builder()
+            .host(ds.getHost()).port(ds.getPort())
+            .user(ds.getUser()).password(ds.getPassword())
+            .database(ds.getDatabase())
+            .stateSerializer(new ObjectStreamStateSerializer&lt;&gt;(AgentState::new))
+            .build();
+    }
+
+    public PostgresSaver saver() { return saver; }
+}
+
+// ============ 2. 用户跨天继续对话(核心场景) ============
+public class CustomerAgentService {
+
+    private final CompiledGraph&lt;AgentState&gt; workflow;
+    private final CheckpointService checkpointService;
+
+    public CustomerAgentService(CompiledGraph&lt;AgentState&gt; workflow, CheckpointService cs) {
+        this.workflow = workflow;
+        this.checkpointService = cs;
+    }
+
+    // 用户发起对话:用 threadId 关联,跨天也能找到
+    public String chat(String userId, String sessionId, String userInput) {
+        String threadId = userId + ":" + sessionId;   // ← 唯一 thread_id
+        var config = RunnableConfig.builder().threadId(threadId).build();
+
+        // 读最近存档(用户上次聊到哪了)
+        var lastState = workflow.lastStateOf(config);
+        Map&lt;String, Object&gt; input = new HashMap&lt;&gt;();
+        if (lastState.isPresent()) {
+            log.info("[AGENT] 用户 {} 上次聊到: {}", userId, lastState.get().node());
+            input.putAll(lastState.get().state().data());   // ← 继承上次 state
+            input.put("input", userInput);                  // ← 加新输入
+        } else {
+            input.put("input", userInput);
+            input.put("user_id", userId);
+        }
+
+        // 跑(自动存档每步)
+        var compileConfig = CompileConfig.builder()
+            .checkpointSaver(checkpointService.saver())
+            .releaseThread(false)
+            .build();
+        var result = workflow.invoke(input, config);
+        checkpointService.saver().release(config);   // ← 显式释放
+        return result.get("agent_response").orElse("").toString();
+    }
+
+    // ============ 3. 客服后台查看用户对话历史(时间旅行) ============
+    public List&lt;Checkpoint&gt; getUserChatHistory(String userId, String sessionId) {
+        String threadId = userId + ":" + sessionId;
+        var config = RunnableConfig.builder().threadId(threadId).build();
+        return workflow.getStateHistory(config);
+    }
+
+    // ============ 4. 客服介入修改 state 后重跑 ============
+    public String interveneAndRerun(String userId, String sessionId, int checkpointIdx,
+                                     Map&lt;String, Object&gt; stateOverrides) {
+        String threadId = userId + ":" + sessionId;
+        var config = RunnableConfig.builder().threadId(threadId).build();
+        var history = workflow.getStateHistory(config);
+
+        if (checkpointIdx &lt; 0 || checkpointIdx &gt;= history.size()) {
+            throw new IllegalArgumentException("Invalid checkpoint idx: " + checkpointIdx);
+        }
+
+        var cp = history.get(checkpointIdx);
+        var newInput = new HashMap&lt;String, Object&gt;(cp.state().data());
+        newInput.putAll(stateOverrides);   // ← 应用客服的修改
+
+        var compileConfig = CompileConfig.builder()
+            .checkpointSaver(checkpointService.saver())
+            .releaseThread(false)
+            .build();
+        var result = workflow.invoke(newInput, config);
+        checkpointService.saver().release(config);
+        return result.get("agent_response").orElse("").toString();
+    }
+
+    // ============ 5. 夜间批处理断点续跑 ============
+    public void resumeAllIncompleteJobs() {
+        // 假设有 job 表记录所有 thread_id
+        List&lt;String&gt; allThreads = jobRepo.findAllThreadIds();
+        for (String threadId : allThreads) {
+            var config = RunnableConfig.builder().threadId(threadId).build();
+            var last = workflow.lastStateOf(config);
+            if (last.isPresent() &amp;&amp; !END.equals(last.get().next())) {
+                log.info("[BATCH] 续跑 thread: {}, 上次停在: {}", threadId, last.get().node());
+                // 从最近存档继续
+                var result = workflow.invoke(last.get().state().data(), config);
+                checkpointService.saver().release(config);
+                jobRepo.markCompleted(threadId);
+            }
+        }
+    }
+
+    // ============ 6. 审计日志(合规) ============
+    public List&lt;Map&lt;String, Object&gt;&gt; getAuditTrail(String userId, String sessionId) {
+        return getUserChatHistory(userId, sessionId).stream()
+            .map(cp -&gt; {
+                Map&lt;String, Object&gt; entry = new HashMap&lt;&gt;();
+                entry.put("node", cp.node());
+                entry.put("next", cp.next());
+                entry.put("state", cp.state().data());
+                entry.put("timestamp", cp.timestamp());
+                return entry;
+            })
+            .collect(Collectors.toList());
+    }
+}</code></pre>
+
+<p>这一段覆盖了 6 个业务场景的存档/读档 —— <strong>用户跨天继续、客服介入、批处理断点续跑、审计、测试可重现、进程崩溃恢复</strong>,所有存档通过 <code>PostgresSaver</code> + <code>getStateHistory()</code> + <code>lastStateOf()</code> + <code>release()</code> 四件套统一收口。</p>
+
+<h2>6. 决策树(用哪种存档策略?)</h2>
+<div class="svg-box">
+<svg viewBox="0 0 900 320" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;">
+  <text x="450" y="25" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">存档策略决策树</text>
+  <rect x="350" y="50" width="200" height="45" rx="8" fill="#8b5cf6"/>
+  <text x="450" y="78" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">需要跨进程 / 跨重启存档?</text>
+  <line x1="450" y1="95" x2="450" y2="115" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="50" y="120" width="320" height="45" rx="8" fill="#3b82f6"/>
+  <text x="210" y="148" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">否(单进程 demo / 短期任务)</text>
+  <rect x="530" y="120" width="320" height="45" rx="8" fill="#3b82f6"/>
+  <text x="690" y="148" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">是(生产 / 长跑 / 跨重启)</text>
+
+  <line x1="210" y1="165" x2="210" y2="190" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="690" y1="165" x2="690" y2="190" stroke="#94a3b8" stroke-width="2"/>
+
+  <rect x="50" y="195" width="320" height="45" rx="8" fill="#10b981"/>
+  <text x="210" y="223" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">✓ MemorySaver(默认,够用)</text>
+  <rect x="530" y="195" width="320" height="45" rx="8" fill="#f59e0b"/>
+  <text x="690" y="223" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">✓ PostgresSaver(需要 Docker/PG)</text>
+
+  <rect x="50" y="255" width="320" height="60" rx="8" fill="#0f172a" stroke="#10b981"/>
+  <text x="210" y="278" text-anchor="middle" fill="#86efac" font-size="11">无外部依赖</text>
+  <text x="210" y="298" text-anchor="middle" fill="#cbd5e1" font-size="11">进程重启 = state 丢失</text>
+
+  <rect x="530" y="255" width="320" height="60" rx="8" fill="#0f172a" stroke="#f59e0b"/>
+  <text x="690" y="278" text-anchor="middle" fill="#fbbf24" font-size="11">需 PG 16.4+ / 配置连接</text>
+  <text x="690" y="298" text-anchor="middle" fill="#cbd5e1" font-size="11">进程重启 = state 可恢复</text>
+</svg>
+</div>
+
+<h2>7. 5 个避坑</h2>
+
+<div class="callout warn">
+<p><strong>❶ releaseThread(false) 必须显式 release(),否则线程 / 连接泄漏</strong></p>
+<p>设了 <code>releaseThread(false)</code> 后,<strong>每次 invoke 完必须调 <code>saver.release(runnableConfig)</code></strong>。常见 bug:复制示例代码忘了加 release,跑 1000 次后线程池打满 + DB 连接耗尽。建议包成 <code>try-with-resources</code> 风格。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❷ stateSerializer 必须全局一致,换了就读不出老存档</strong></p>
+<p><code>PostgresSaver</code> 用 <code>ObjectStreamStateSerializer</code> 存的 state,换 <code>JacksonSerializer</code> 读出来直接报 <code>ClassNotFoundException</code> / <code>InvalidClassException</code>。<strong>序列化器一旦定下来就不能换</strong>,否则历史存档作废。建议从一开始就用一个稳定的序列化器。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❸ createTables(true) 只在首次启动用,生产用 Flyway / Liquibase 迁移</strong></p>
+<p><code>createTables(true)</code> 自动建表 = 方便开发但生产危险 —— 不会跟踪 schema 版本,字段变更 / 索引优化 / 数据迁移全失控。<strong>生产用 Flyway / Liquibase</strong> 管理 schema 变更,<code>createTables(false)</code> 让程序假设表已存在。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❹ getStateHistory() 返回的列表是"视图"不是快照,不要边遍历边 invoke</strong></p>
+<p><code>getStateHistory()</code> 返回的 <code>List&lt;Checkpoint&gt;</code> 是从 saver 内存缓存读的<strong>实时视图</strong>,如果你在遍历 history 的同时又在另一个线程 invoke 同 thread 的 workflow,<strong>可能抛 ConcurrentModificationException</strong>。建议遍历前先 <code>new ArrayList&lt;&gt;(history)</code> 拷贝一份。</p>
+</div>
+
+<div class="callout warn">
+<p><strong>❺ PostgresSaver 的内存缓存不会自动失效,跨进程读会"看不到"对方写的</strong></p>
+<p>saver 内部有内存缓存(减少 DB 往返),但<strong>缓存是进程级的</strong>。A 进程写了存档,B 进程新建 saver 实例后<strong>内存缓存是空的</strong>,B 读的是 DB(正确)。但如果 B 进程复用了一个 saver 实例,缓存可能"过期"。重启进程 / 新建 saver 实例是安全做法。</p>
+</div>
+
+<h2>8. 速查表</h2>
+<table class="compare-table">
+  <thead>
+    <tr><th>API</th><th>行为</th><th>典型场景</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>PostgresSaver.builder()</code></td><td>构建器(host/port/user/pwd/db/serializer)</td><td>初始化 saver</td></tr>
+    <tr><td><code>.createTables(true)</code></td><td>启动时自动建表(开发用)</td><td>首次启动 / 测试环境</td></tr>
+    <tr><td><code>CompileConfig.checkpointSaver(saver)</code></td><td>编译时挂存档</td><td>配置 workflow</td></tr>
+    <tr><td><code>.releaseThread(false)</code></td><td>不自动释放线程</td><td>需要手动 release 的场景</td></tr>
+    <tr><td><code>workflow.getStateHistory(config)</code></td><td>返回 List&lt;Checkpoint&gt;(时间倒序)</td><td>时间旅行 debug / 审计</td></tr>
+    <tr><td><code>workflow.lastStateOf(config)</code></td><td>返回 Optional&lt;NodeOutput&gt;(最近)</td><td>崩溃恢复 / 跨天继续</td></tr>
+    <tr><td><code>saver.release(config)</code></td><td>释放线程 / 资源</td><td>releaseThread(false) 时必调</td></tr>
+  </tbody>
+</table>
+
+<h2>9. 本章小结</h2>
+<blockquote>
+<p><strong>检查点 = graph 状态的"游戏存档"</strong>。<code>PostgresSaver</code> 持久化 + <code>getStateHistory</code> 时间旅行 + <code>lastStateOf</code> 读档 + <code>release</code> 释放 = 长跑 agent 的全套存档/读档机制。</p>
+<p><strong>🎉 lg07 完工 = langGraph4j 7 章教程全部收官</strong>!核心库 → 子图 → 并行分支 → 流式传输 → 钩子 → 取消 → 检查点,LangGraph4j 全部官方能力已覆盖。下一步可以:做整体收官(补 index.html 把 lg01-07 都列上)/ 启动新项目 / 暂停。</p>
+</blockquote>
+
+</main>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

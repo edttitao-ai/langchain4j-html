@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch12 · Logging · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="container">
+    <h1><span class="num">12</span>日志记录(LLM 行为的黑匣子)</h1>
+    <p class="hero-sub">SLF4J 门面 + 3 个开关 + 3 套集成 + 敏感信息脱敏 + MDC 链路追踪</p>
+  </div>
+</header>
+
+<main class="container">
+
+<p><strong>一句话定性</strong>:<code>SLF4J</code> + <code>.logRequests(true)</code> / <code>.logResponses(true)</code> / <code>.logRequestsAndResponses(true)</code> 三个开关 + 任意日志后端(Logback / Log4j2 / JUL) = LangChain4j 全链路可观测。生产环境 <strong>必开</strong>,否则 LLM 调用像黑盒 —— prompt 发了什么、响应回了什么、token 用了多少全看不见。</p>
+
+<h2>1. 业务场景</h2>
+
+<p>老板:"上周客服 AI 投诉量突然涨了 30%,客服说 AI 答非所问。能不能把 AI 的对话记录拉出来看看它到底说了啥?"</p>
+
+<p><strong>解法</strong>:LangChain4j 用 <code>SLF4J</code> 作为日志门面,<strong>三个开关</strong>控制请求/响应的日志输出。配上 Logback 的 Console / File / JSON 输出,就能把 LLM 行为"刻进石板"。</p>
+
+<h3>5 个 Logging 能解决的事</h3>
+<ul>
+  <li><strong>🪲 调试 AI 行为</strong> — 用户反馈"AI 答非所问",拉日志看 prompt 实际发给 LLM 的内容,排查是 prompt 拼错了还是 LLM 偏题</li>
+  <li><strong>💰 算 LLM 成本</strong> — 响应日志里带 token 用量(<code>tokenUsage.inputTokenCount()</code> / <code>outputTokenCount()</code>),按用户/会话聚合,算出谁在烧钱</li>
+  <li><strong>📜 合规审计</strong> — 金融/医疗行业必须保留 AI 决策依据(<strong>"为什么拒绝这笔贷款"</strong>),日志是审计证据</li>
+  <li><strong>📈 性能分析</strong> — 响应日志带耗时,可以分析"哪些 prompt 慢、哪些模型快、什么时候超时"</li>
+  <li><strong>🛡️ 故障排查</strong> — 线上 AI 突然 500,看错误日志知道是 prompt 超长截断、API key 过期、还是 rate limit</li>
+</ul>
+
+<p><strong>💡 没日志的代价</strong>:真实事故 —— 某跨境电商 AI 客服把内部折扣策略"无意"透露给客户,事后复盘才发现是 prompt 拼接时把 <code>internalConfig</code> 拼进去了。<strong>没有日志,事故永远查不清</strong>。</p>
+
+<blockquote class="mihuang">
+  <strong>口诀</strong>:生产环境 <code>logRequests=true</code> + <code>logResponses=true</code> <strong>必开</strong>,脱敏 <strong>必做</strong>,MDC 链路 <strong>必加</strong>。三必三不做,事故来了能甩锅。
+</blockquote>
+
+<h2>2. 核心机制</h2>
+
+<p>LangChain4j 的日志体系是<strong>三层结构</strong>:</p>
+
+<pre><code>┌─────────────────────────────────────────────────────┐
+│ 第 1 层:SLF4J 门面(你的代码只认这个,不耦合具体实现) │
+│   LangChain4j 内部所有日志走 SLF4J                 │
+├─────────────────────────────────────────────────────┤
+│ 第 2 层:LangChain4j 的 3 个开关                      │
+│   .logRequests(true)         — 打印发出去的请求      │
+│   .logResponses(true)        — 打印收到的响应        │
+│   .logRequestsAndResponses() — 一行打请求+响应      │
+├─────────────────────────────────────────────────────┤
+│ 第 3 层:日志后端(选一个或多个)                       │
+│   Logback(推荐)/ Log4j2 / JUL / JCL                 │
+│   输出到 Console / File / JSON / Syslog / Kafka      │
+└─────────────────────────────────────────────────────┘</code></pre>
+
+<h3>2.1 SLF4J 门面是什么</h3>
+
+<p><strong>SLF4J</strong>(Simple Logging Facade for Java)是一个<strong>日志抽象层</strong>。LangChain4j 写日志只调 <code>SLF4J API</code>,你项目里接什么日志框架(Logback / Log4j2 / JUL)由你决定 —— 换日志框架<strong>不用改 LangChain4j 代码</strong>。</p>
+
+<h3>2.2 3 个开关的区别</h3>
+
+<table>
+<thead><tr><th>开关</th><th>输出内容</th><th>日志量</th><th>适用场景</th></tr></thead>
+<tbody>
+<tr><td><code>.logRequests(true)</code></td><td>只打印 <strong>请求</strong>(发给 LLM 的 prompt)</td><td>每请求 1 行</td><td>想知道 AI "问了什么"</td></tr>
+<tr><td><code>.logResponses(true)</code></td><td>只打印 <strong>响应</strong>(LLM 回复内容)</td><td>每响应 1 行</td><td>想知道 AI "答了什么"</td></tr>
+<tr><td><code>logRequestsAndResponses(true)</code></td><td>请求+响应<strong>同一行</strong>打</td><td>每调用 1 行</td><td>想快速看 prompt ↔ response 对应关系</td></tr>
+</tbody>
+</table>
+
+<p><strong>⚠️ 默认行为</strong>:<strong>全部关闭</strong>(<code>false</code>)。生产环境不显式开启 = 看不到任何 LLM 调用日志。</p>
+
+<h3>2.3 日志级别对照</h3>
+
+<table>
+<thead><tr><th>SLF4J Level</th><th>LangChain4j 用在哪</th><th>建议</th></tr></thead>
+<tbody>
+<tr><td><code>ERROR</code></td><td>LLM 调用异常 / API key 失效 / 网络超时</td><td>生产<strong>必保留</strong></td></tr>
+<tr><td><code>WARN</code></td><td>prompt 被截断 / 重试 / 模型降级</td><td>生产<strong>必保留</strong></td></tr>
+<tr><td><code>INFO</code></td><td>请求/响应内容(开 logRequests 时)</td><td>生产<strong>建议保留</strong>(INFO 级别)</td></tr>
+<tr><td><code>DEBUG</code></td><td>详细请求/响应 + token 数</td><td>调试时开,生产关闭</td></tr>
+<tr><td><code>TRACE</code></td><td>完整 HTTP body + header</td><td>深排查,性能损耗大</td></tr>
+</tbody>
+</table>
+
+<h2>3. 纯 Java 集成</h2>
+
+<p>不依赖 Spring/Quarkus,用 <code>langchain4j-open-ai</code> 原生 SDK。</p>
+
+<h3>3.1 启用日志开关</h3>
+
+<pre><code>// 最简配置:Builder 链式调用开启日志
+OpenAiChatModel model = OpenAiChatModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .modelName("gpt-4o-mini")
+    .logRequests(true)       // 打印发出去的 prompt
+    .logResponses(true)      // 打印收到的响应
+    .build();</code></pre>
+
+<p><strong>输出效果</strong>(在 Console 看到):</p>
+<pre><code>14:32:01.123 [main] DEBUG dev.langchain4j.model.openai.OpenAiChatModel -
+  Request: { "messages": [ { "role": "user", "content": "什么是 LangChain4j?" } ], "model": "gpt-4o-mini", "temperature": 0.7 }
+14:32:03.456 [main] DEBUG dev.langchain4j.model.openai.OpenAiChatModel -
+  Response: { "id": "chatcmpl-abc123", "choices": [ { "message": { "role": "assistant", "content": "LangChain4j 是 Java 的 LLM 框架..." } } ], "usage": { "prompt_tokens": 18, "completion_tokens": 156, "total_tokens": 174 } }</code></pre>
+
+<h3>3.2 加 Logback 依赖</h3>
+
+<p><strong>SLF4J 只是个接口,必须有实现</strong>。LangChain4j 不会自己带 Logback,你要在 pom.xml 加:</p>
+
+<pre><code>&lt;!-- pom.xml --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;org.slf4j&lt;/groupId&gt;
+    &lt;artifactId&gt;slf4j-api&lt;/artifactId&gt;
+    &lt;version&gt;2.0.13&lt;/version&gt;
+&lt;/dependency&gt;
+
+&lt;!-- Logback 是最常用的 SLF4J 实现 --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;ch.qos.logback&lt;/groupId&gt;
+    &lt;artifactId&gt;logback-classic&lt;/artifactId&gt;
+    &lt;version&gt;1.5.8&lt;/version&gt;
+&lt;/dependency&gt;</code></pre>
+
+<p><strong>💡 为什么选 Logback</strong>:Spring Boot 默认用它,性能好(异步日志器),配置灵活(logback.xml 强大)。<strong>不建议用 Log4j 1.x</strong>(已 EOL,2015 年停止维护)。</p>
+
+<h3>3.3 最小 Logback 配置</h3>
+
+<pre><code>&lt;!-- src/main/resources/logback.xml --&gt;
+&lt;configuration&gt;
+    &lt;!-- 输出到 Console --&gt;
+    &lt;appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender"&gt;
+        &lt;encoder&gt;
+            &lt;pattern&gt;%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n&lt;/pattern&gt;
+        &lt;/encoder&gt;
+    &lt;/appender&gt;
+
+    &lt;!-- LangChain4j 包设 DEBUG(看到请求/响应细节) --&gt;
+    &lt;logger name="dev.langchain4j" level="DEBUG"/&gt;
+
+    &lt;!-- 其他包默认 INFO --&gt;
+    &lt;root level="INFO"&gt;
+        &lt;appender-ref ref="CONSOLE"/&gt;
+    &lt;/root&gt;
+&lt;/configuration&gt;</code></pre>
+
+<h2>4. Spring Boot 集成</h2>
+
+<p>Spring Boot 默认带 Logback,所以 <strong>不用额外加依赖</strong>。只需要在 <code>application.properties</code> 配开关 + 在 <code>logback-spring.xml</code> 配格式。</p>
+
+<h3>4.1 application.properties</h3>
+
+<pre><code># application.properties
+# LangChain4j 自己的日志开关(关键!没这俩就是黑盒)
+langchain4j.open-ai.chat-model.log-requests=true
+langchain4j.open-ai.chat-model.log-responses=true
+
+# 把 LangChain4j 包级别调到 DEBUG(否则 INFO 看不到 prompt 内容)
+logging.level.dev.langchain4j=DEBUG
+
+# Spring Boot 自带的日志级别
+logging.level.root=INFO
+logging.level.com.yourcompany=DEBUG</code></pre>
+
+<h3>4.2 logback-spring.xml(Spring 增强版)</h3>
+
+<p><strong>logback-spring.xml</strong> 比 <code>logback.xml</code> 强 —— 支持 <code>&lt;springProfile&gt;</code> 标签,可以在不同环境用不同配置。</p>
+
+<pre><code>&lt;!-- src/main/resources/logback-spring.xml --&gt;
+&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;configuration&gt;
+    &lt;!-- 控制台 appender --&gt;
+    &lt;appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender"&gt;
+        &lt;encoder&gt;
+            &lt;pattern&gt;%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [traceId=%X{traceId:-}] - %msg%n&lt;/pattern&gt;
+        &lt;/encoder&gt;
+    &lt;/appender&gt;
+
+    &lt;!-- 文件 appender(每天切割) --&gt;
+    &lt;appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender"&gt;
+        &lt;file&gt;logs/langchain4j-app.log&lt;/file&gt;
+        &lt;rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy"&gt;
+            &lt;fileNamePattern&gt;logs/langchain4j-app.%d{yyyy-MM-dd}.log.gz&lt;/fileNamePattern&gt;
+            &lt;maxHistory&gt;30&lt;/maxHistory&gt;
+            &lt;totalSizeCap&gt;10GB&lt;/totalSizeCap&gt;
+        &lt;/rollingPolicy&gt;
+        &lt;encoder&gt;
+            &lt;pattern&gt;%d{ISO8601} [%thread] %-5level %logger{36} - %msg%n&lt;/pattern&gt;
+        &lt;/encoder&gt;
+    &lt;/appender&gt;
+
+    &lt;!-- dev 环境:DEBUG 级别 + 仅控制台 --&gt;
+    &lt;springProfile name="dev"&gt;
+        &lt;logger name="dev.langchain4j" level="DEBUG"/&gt;
+        &lt;root level="INFO"&gt;
+            &lt;appender-ref ref="CONSOLE"/&gt;
+        &lt;/root&gt;
+    &lt;/springProfile&gt;
+
+    &lt;!-- prod 环境:INFO 级别 + 文件 + 脱敏 --&gt;
+    &lt;springProfile name="prod"&gt;
+        &lt;logger name="dev.langchain4j" level="INFO"/&gt;
+        &lt;root level="INFO"&gt;
+            &lt;appender-ref ref="CONSOLE"/&gt;
+            &lt;appender-ref ref="FILE"/&gt;
+        &lt;/root&gt;
+    &lt;/springProfile&gt;
+&lt;/configuration&gt;</code></pre>
+
+<p><strong>💡 关键设计</strong>:
+- <code>[traceId=%X{traceId:-}]</code> 读 MDC(Mapped Diagnostic Context)的 traceId,关联分布式链路
+- <code>rollingPolicy</code> 每天切割 + gzip 压缩,保留 30 天,总大小 10GB 上限
+- <code>springProfile</code> 按环境切换:dev 看 DEBUG,prod 看 INFO + 落盘</p>
+
+<h3>4.3 @AiService 接口自动启用日志</h3>
+
+<p>如果用 <code>@AiService</code> 声明式 interface(参见 ch05),日志开关配在 properties 里就行:</p>
+
+<pre><code># application.properties
+langchain4j.open-ai.chat-model.log-requests=true
+langchain4j.open-ai.chat-model.log-responses=true
+
+# 多模型场景:每个模型都开
+langchain4j.anthropic.chat-model.log-requests=true
+langchain4j.ollama.chat-model.log-requests=true</code></pre>
+
+<p><strong>自动接线</strong>:Spring Boot starter 自动注入这些配置到对应的 ChatModel Bean,不用代码层干预。</p>
+
+<h2>5. Quarkus 集成</h2>
+
+<p>Quarkus 用自己的 logging 体系(基于 JBoss LogManager),配置在 <code>application.properties</code>。</p>
+
+<h3>5.1 启用日志</h3>
+
+<pre><code># application.properties
+# 开启 LangChain4j 请求/响应日志
+quarkus.langchain4j.openai.chat-model.log-requests=true
+quarkus.langchain4j.openai.chat-model.log-responses=true
+
+# 启用 Quarkus Console 日志
+quarkus.log.console.enable=true
+quarkus.log.console.level=INFO
+
+# 启用文件日志(可选)
+quarkus.log.file.enable=true
+quarkus.log.file.path=logs/quarkus.log
+quarkus.log.file.level=INFO
+
+# LangChain4j 包级别
+quarkus.log.category."dev.langchain4j".level=DEBUG</code></pre>
+
+<p><strong>⚠️ Quarkus vs Spring Boot 的命名差异</strong>:</p>
+<table>
+<thead><tr><th>配置项</th><th>Spring Boot</th><th>Quarkus</th></tr></thead>
+<tbody>
+<tr><td>开启开关</td><td><code>langchain4j.open-ai.chat-model.log-requests</code></td><td><code>quarkus.langchain4j.openai.chat-model.log-requests</code></td></tr>
+<tr><td>包日志级别</td><td><code>logging.level.dev.langchain4j=DEBUG</code></td><td><code>quarkus.log.category."dev.langchain4j".level=DEBUG</code></td></tr>
+<tr><td>日志框架</td><td>默认 Logback</td><td>默认 JBoss LogManager</td></tr>
+</tbody>
+</table>
+
+<h3>5.2 Quarkus Dev UI 实时改日志级别</h3>
+
+<p>Quarkus 一个超能力:开发模式下(<code>mvn quarkus:dev</code>)通过 <code>http://localhost:8080/q/dev-ui</code> 图形界面<strong>实时改</strong>日志级别,不用重启服务:</p>
+
+<pre><code># 启动开发模式
+mvn quarkus:dev
+
+# 浏览器访问
+http://localhost:8080/q/dev-ui
+
+# 进入 Configuration → Logging → 把 dev.langchain4j 从 INFO 改成 DEBUG
+# 立即生效,不需要重启</code></pre>
+
+<p><strong>💡 这对调试超级有用</strong>:线上反馈"某个 AI 调用有问题",Dev 模式直接打开 DEBUG,看完整 prompt/response,不用打包重启。</p>
+
+<h2>6. 实战 Logback 配置(企业级)</h2>
+
+<p>生产环境的 Logback 配置要考虑:<strong>性能 + 切割 + 脱敏 + MDC + 异步</strong>。</p>
+
+<h3>6.1 完整配置(Console + File + JSON + 异步)</h3>
+
+<pre><code>&lt;!-- src/main/resources/logback.xml --&gt;
+&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;configuration&gt;
+
+    &lt;!-- 1️⃣ Console(开发用,人眼读) --&gt;
+    &lt;appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender"&gt;
+        &lt;encoder&gt;
+            &lt;pattern&gt;%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} [traceId=%X{traceId:-}] - %msg%n&lt;/pattern&gt;
+        &lt;/encoder&gt;
+    &lt;/appender&gt;
+
+    &lt;!-- 2️⃣ 文本文件(给人/grep 用,每天切割) --&gt;
+    &lt;appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender"&gt;
+        &lt;file&gt;logs/app.log&lt;/file&gt;
+        &lt;rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy"&gt;
+            &lt;fileNamePattern&gt;logs/app.%d{yyyy-MM-dd}.%i.log.gz&lt;/fileNamePattern&gt;
+            &lt;timeBasedFileNamingAndTriggeringPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP"&gt;
+                &lt;maxFileSize&gt;100MB&lt;/maxFileSize&gt;
+            &lt;/timeBasedFileNamingAndTriggeringPolicy&gt;
+            &lt;maxHistory&gt;30&lt;/maxHistory&gt;
+            &lt;totalSizeCap&gt;20GB&lt;/totalSizeCap&gt;
+        &lt;/rollingPolicy&gt;
+        &lt;encoder&gt;
+            &lt;pattern&gt;%d{ISO8601} [%thread] %-5level %logger{36} [traceId=%X{traceId:-}] - %msg%n&lt;/pattern&gt;
+        &lt;/encoder&gt;
+    &lt;/appender&gt;
+
+    &lt;!-- 3️⃣ JSON 文件(给 ELK/Loki/Splunk 收集) --&gt;
+    &lt;appender name="JSON_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender"&gt;
+        &lt;file&gt;logs/app.json&lt;/file&gt;
+        &lt;rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy"&gt;
+            &lt;fileNamePattern&gt;logs/app.%d{yyyy-MM-dd}.json.gz&lt;/fileNamePattern&gt;
+            &lt;maxHistory&gt;30&lt;/maxHistory&gt;
+        &lt;/rollingPolicy&gt;
+        &lt;encoder class="ch.qos.logback.classic.encoder.JsonEncoder"&gt;
+            &lt;includeMdcKeyName&gt;traceId&lt;/includeMdcKeyName&gt;
+            &lt;includeMdcKeyName&gt;userId&lt;/includeMdcKeyName&gt;
+            &lt;includeContext&gt;false&lt;/includeContext&gt;
+        &lt;/encoder&gt;
+    &lt;/appender&gt;
+
+    &lt;!-- 4️⃣ 异步包装器(性能:不阻塞业务线程) --&gt;
+    &lt;appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender"&gt;
+        &lt;queueSize&gt;2048&lt;/queueSize&gt;
+        &lt;discardingThreshold&gt;0&lt;/discardingThreshold&gt;
+        &lt;neverBlock&gt;false&lt;/neverBlock&gt;
+        &lt;includeCallerData&gt;false&lt;/includeCallerData&gt;
+        &lt;appender-ref ref="FILE"/&gt;
+        &lt;appender-ref ref="JSON_FILE"/&gt;
+    &lt;/appender&gt;
+
+    &lt;!-- Logger 级别 --&gt;
+    &lt;logger name="dev.langchain4j" level="INFO"/&gt;
+    &lt;logger name="dev.langchain4j.model.openai" level="DEBUG"/&gt;  &lt;!-- 想看 prompt 内容就开 --&gt;
+
+    &lt;!-- 抑制一些噪音 logger --&gt;
+    &lt;logger name="okhttp3" level="WARN"/&gt;
+    &lt;logger name="io.netty" level="WARN"/&gt;
+
+    &lt;root level="INFO"&gt;
+        &lt;appender-ref ref="CONSOLE"/&gt;
+        &lt;appender-ref ref="ASYNC_FILE"/&gt;
+    &lt;/root&gt;
+&lt;/configuration&gt;</code></pre>
+
+<p><strong>核心设计点</strong>:</p>
+<ul>
+  <li><strong>双格式输出</strong>:文本给人看(<code>app.log</code>)+ JSON 给日志系统吃(<code>app.json</code>)</li>
+  <li><strong>大小 + 时间双维度切割</strong>:每天一个文件,单个最大 100MB</li>
+  <li><strong>异步 Appender</strong>:<code>AsyncAppender</code> 队列 2048,业务线程不阻塞</li>
+  <li><strong>MDC 透出</strong>:traceId / userId 进 JSON 字段,方便 ELK 关联</li>
+  <li><strong>噪音抑制</strong>:okhttp / netty 调到 WARN,减少无关注入</li>
+</ul>
+
+<h2>7. 敏感信息脱敏</h2>
+
+<p><strong>⚠️ 生产环境必做</strong>:日志里看到明文 API key / 用户手机号 / 身份证 = 数据泄露事故。</p>
+
+<h3>7.1 LangChain4j 自带的脱敏</h3>
+
+<p>LangChain4j 1.1+ 提供 <code>SanitizedResponseLoggingAdapter</code>(部分版本),自动把 <code>api-key</code> 字段替换成 <code>api-key=***</code>:</p>
+
+<pre><code>// 部分版本支持
+OpenAiChatModel model = OpenAiChatModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .logRequests(true)
+    .logResponses(true)
+    // .sanitizeResponseLogs(true)  // 视版本支持
+    .build();</code></pre>
+
+<h3>7.2 自定义 MaskingPatternLayout(企业级)</h3>
+
+<p>如果内置脱敏不够(要脱手机号、身份证、银行卡),写自定义 Logback PatternLayout:</p>
+
+<pre><code>// 1️⃣ 自定义 MaskingLayout.java
+public class MaskingLayout extends PatternLayout {
+    // 匹配 API key (sk-xxx, AKIAxxx)
+    private static final Pattern API_KEY_PATTERN = Pattern.compile("(sk-[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16})");
+    // 匹配中国大陆手机号
+    private static final Pattern PHONE_PATTERN = Pattern.compile("(?&lt;!\\d)1[3-9]\\d{9}(?!\\d)");
+    // 匹配身份证
+    private static final Pattern ID_CARD_PATTERN = Pattern.compile("\\d{17}[\\dXx]");
+    // 匹配银行卡(16-19 位数字)
+    private static final Pattern BANK_CARD_PATTERN = Pattern.compile("\\b\\d{16,19}\\b");
+
+    @Override
+    public String doLayout(ILoggingEvent event) {
+        String message = super.doLayout(event);
+        return mask(message);
+    }
+
+    private String mask(String message) {
+        if (message == null) return null;
+        message = API_KEY_PATTERN.matcher(message).replaceAll("***MASKED_API_KEY***");
+        message = PHONE_PATTERN.matcher(message).replaceAll("***MASKED_PHONE***");
+        message = ID_CARD_PATTERN.matcher(message).replaceAll("***MASKED_ID_CARD***");
+        message = BANK_CARD_PATTERN.matcher(message).replaceAll("***MASKED_BANK_CARD***");
+        return message;
+    }
+}</code></pre>
+
+<p><strong>2️⃣ 注册到 Logback</strong>(<code>logback.xml</code> 加 <code>layout</code> 标签):</p>
+
+<pre><code>&lt;appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender"&gt;
+    &lt;!-- 用自定义脱敏 Layout --&gt;
+    &lt;layout class="com.yourcompany.logging.MaskingLayout"&gt;
+        &lt;pattern&gt;%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n&lt;/pattern&gt;
+    &lt;/layout&gt;
+&lt;/appender&gt;</code></pre>
+
+<p><strong>效果</strong>:</p>
+<pre><code>// 原始日志
+14:32:01 Request: api-key=sk-proj-abc123def456ghi789jkl, user phone 13812345678
+
+// 脱敏后
+14:32:01 Request: api-key=***MASKED_API_KEY***, user phone ***MASKED_PHONE***</code></pre>
+
+<h3>7.3 MDC 链路追踪</h3>
+
+<p><strong>MDC</strong>(Mapped Diagnostic Context) = 把"上下文信息"塞进日志里。最常用的:<strong>traceId</strong>(分布式链路 ID)。</p>
+
+<pre><code>// 在 Spring Boot 拦截器里塞 traceId
+@Component
+public class TraceIdInterceptor implements HandlerInterceptor {
+    @Override
+    public boolean preHandle(HttpServletRequest req, HttpServletResponse resp, Object handler) {
+        String traceId = UUID.randomUUID().toString().replace("-", "");
+        MDC.put("traceId", traceId);
+        MDC.put("userId", getCurrentUserId());  // 当前登录用户
+        resp.setHeader("X-Trace-Id", traceId);   // 返回给前端
+        return true;
+    }
+
+    @Override
+    public void afterCompletion(...) {
+        MDC.clear();  // 清理,防线程复用污染
+    }
+}</code></pre>
+
+<p><strong>Logback pattern 里读 MDC</strong>:</p>
+<pre><code>&lt;pattern&gt;%d{HH:mm:ss.SSS} [traceId=%X{traceId:-NONE}] [user=%X{userId:-GUEST}] %-5level - %msg%n&lt;/pattern&gt;</code></pre>
+
+<p><strong>效果</strong>:同一次请求的<strong>所有日志自动带 traceId</strong>,grep 一个 ID 就找到整个调用链。</p>
+
+<pre><code>14:32:01.123 [traceId=a1b2c3d4] [user=user-789] INFO  - 收到 chat 请求
+14:32:01.234 [traceId=a1b2c3d4] [user=user-789] DEBUG dev.langchain4j - Request: ...
+14:32:03.456 [traceId=a1b2c3d4] [user=user-789] DEBUG dev.langchain4j - Response: ...
+14:32:03.567 [traceId=a1b2c3d4] [user=user-789] INFO  - 返回结果,耗时 2.4s</code></pre>
+
+<h2>8. 选型决策树</h2>
+
+<svg viewBox="0 0 900 580" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;background:#f8fafc;border-radius:8px;padding:12px;">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 9 3, 0 6" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <!-- 根节点 -->
+  <rect x="350" y="20" width="200" height="50" rx="8" fill="#1e40af" stroke="#1e3a8a" stroke-width="2"/>
+  <text x="450" y="42" text-anchor="middle" font-size="14" font-weight="600" fill="white">需要 LangChain4j 日志?</text>
+  <text x="450" y="58" text-anchor="middle" font-size="11" fill="#dbeafe">生产环境 100% 需要</text>
+
+  <!-- 左:不集成任何框架 -->
+  <rect x="60" y="120" width="180" height="45" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="150" y="140" text-anchor="middle" font-size="12" font-weight="600" fill="#1e40af">A. 纯 Java SDK</text>
+  <text x="150" y="156" text-anchor="middle" font-size="10" fill="#1e40af">langchain4j-open-ai</text>
+
+  <line x1="380" y1="70" x2="180" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <rect x="40" y="190" width="220" height="42" rx="6" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="150" y="208" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">→ .logRequests(true) + Logback</text>
+  <text x="150" y="222" text-anchor="middle" font-size="9" fill="#065f46">slf4j-api + logback-classic 依赖</text>
+
+  <line x1="150" y1="165" x2="150" y2="190" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 中:Spring Boot -->
+  <rect x="360" y="120" width="180" height="45" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="450" y="140" text-anchor="middle" font-size="12" font-weight="600" fill="#92400e">B. Spring Boot 项目</text>
+  <text x="450" y="156" text-anchor="middle" font-size="10" fill="#92400e">国人最熟</text>
+
+  <line x1="450" y1="70" x2="450" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <rect x="340" y="190" width="220" height="42" rx="6" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="450" y="208" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">→ properties 配开关 + logback-spring.xml</text>
+  <text x="450" y="222" text-anchor="middle" font-size="9" fill="#065f46">默认 Logback,不用额外依赖</text>
+
+  <line x1="450" y1="165" x2="450" y2="190" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 右:Quarkus -->
+  <rect x="660" y="120" width="180" height="45" rx="6" fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="750" y="140" text-anchor="middle" font-size="12" font-weight="600" fill="#5b21b6">C. Quarkus 项目</text>
+  <text x="750" y="156" text-anchor="middle" font-size="10" fill="#5b21b6">quarkus-langchain4j</text>
+
+  <line x1="520" y1="70" x2="720" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <rect x="640" y="190" width="220" height="42" rx="6" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="750" y="208" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">→ quarkus.langchain4j.* 属性</text>
+  <text x="750" y="222" text-anchor="middle" font-size="9" fill="#065f46">JBoss LogManager,Dev UI 实时改</text>
+
+  <line x1="750" y1="165" x2="750" y2="190" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 第二层:是否敏感信息 -->
+  <rect x="350" y="290" width="200" height="50" rx="8" fill="#7c3aed" stroke="#6d28d9" stroke-width="2"/>
+  <text x="450" y="312" text-anchor="middle" font-size="13" font-weight="600" fill="white">有敏感信息?</text>
+  <text x="450" y="328" text-anchor="middle" font-size="10" fill="#ede9fe">API key / 手机号 / 身份证</text>
+
+  <line x1="150" y1="232" x2="380" y2="290" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="450" y1="232" x2="450" y2="290" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="750" y1="232" x2="520" y2="290" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- 左:无敏感 -->
+  <rect x="80" y="380" width="220" height="45" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="190" y="400" text-anchor="middle" font-size="12" font-weight="600" fill="#92400e">无 / 内部系统</text>
+  <text x="190" y="416" text-anchor="middle" font-size="10" fill="#92400e">默认 JSON / 文本输出</text>
+
+  <line x1="370" y1="315" x2="300" y2="380" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 右:有敏感 -->
+  <rect x="600" y="380" width="220" height="45" rx="6" fill="#fecaca" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="710" y="400" text-anchor="middle" font-size="12" font-weight="600" fill="#7f1d1d">有 / 对外服务</text>
+  <text x="710" y="416" text-anchor="middle" font-size="10" fill="#7f1d1d">必须脱敏!MaskingLayout</text>
+
+  <line x1="530" y1="315" x2="600" y2="380" stroke="#dc2626" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- 终端:最佳实践 -->
+  <rect x="100" y="475" width="700" height="60" rx="8" fill="#1e3a8a" stroke="#1e40af" stroke-width="2"/>
+  <text x="450" y="500" text-anchor="middle" font-size="13" font-weight="600" fill="white">最佳实践 5 件套</text>
+  <text x="450" y="518" text-anchor="middle" font-size="11" fill="#dbeafe">logRequests+logResponses=true | logback-spring.xml 双格式 | MDC traceId | MaskingLayout 脱敏 | AsyncAppender 不阻塞</text>
+
+  <line x1="190" y1="425" x2="280" y2="475" stroke="#10b981" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="710" y1="425" x2="620" y2="475" stroke="#10b981" stroke-width="1.5" marker-end="url(#arr)"/>
+</svg>
+
+<h2>9. 5 个避坑</h2>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 1:开了 logRequests 但看不见 prompt 内容</strong><br>
+<strong>症状</strong>:<code>logRequests=true</code> 配了,Console 看不到 prompt,只看到一行 "Request sent"。<br>
+<strong>根因</strong>:LangChain4j 的请求日志是 <strong>DEBUG 级别</strong>,但你 logback 把 <code>dev.langchain4j</code> 设到 <code>INFO</code>。<br>
+<strong>修法</strong>:<code>logging.level.dev.langchain4j=DEBUG</code>(或 <code>&lt;logger name="dev.langchain4j" level="DEBUG"/&gt;</code>)。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 2:日志里直接看到明文 API key</strong><br>
+<strong>症状</strong>:日志文件里 <code>api-key=sk-proj-abc123...</code> 明文打印,被爬虫抓到或者审计不合规。<br>
+<strong>根因</strong>:LangChain4j 默认日志输出<strong>包含 Authorization header</strong>(即 API key)。<br>
+<strong>修法</strong>:用第 7 节自定义 <code>MaskingLayout</code>,匹配 <code>sk-[a-zA-Z0-9]{20,}</code> 正则替换。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 3:AsyncAppender 日志丢失</strong><br>
+<strong>症状</strong>:业务跑了 1 小时,日志文件少了 20% 内容。<br>
+<strong>根因</strong>:JVM 关闭时 <code>AsyncAppender</code> 队列里的日志还没刷盘,直接被丢掉。<br>
+<strong>修法</strong>:<code>discardingThreshold=0</code>(永不丢)+ <code>shutdownHook</code> 注册 <code>LoggerFactory.getILoggerFactory()</code> 的 stop。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 4:Quarkus 项目用 logback.xml 不生效</strong><br>
+<strong>症状</strong>:在 <code>resources/logback.xml</code> 写了配置,Quarkus 启动完全没读。<br>
+<strong>根因</strong>:Quarkus 用 JBoss LogManager,<strong>不用 Logback</strong>(除非显式加 quarkus-logging-logback 扩展)。<br>
+<strong>修法</strong>:要么继续用 Quarkus 自家的 <code>quarkus.log.*</code> 配置;要么加 <code>&lt;dependency&gt; &lt;groupId&gt;io.quarkus&lt;/groupId&gt; &lt;artifactId&gt;quarkus-logging-logback&lt;/artifactId&gt; &lt;/dependency&gt;</code>。
+</div>
+
+<div class="callout-warn">
+<strong>⚠️ 坑 5:MDC 线程复用导致 traceId 串了</strong><br>
+<strong>症状</strong>:用户 A 的请求日志里出现用户 B 的 traceId,链路查询彻底乱掉。<br>
+<strong>根因</strong>:Tomcat 线程池复用线程,<code>MDC.clear()</code> 没在请求结束时调用,上一个请求的 traceId 留到了下一个请求。<br>
+<strong>修法</strong>:用 <code>HandlerInterceptor</code> + <code>MDC.clear()</code> + 或者用 Spring 的 <code>MDCContextFilter</code>(Sleuth 自带)。
+</div>
+
+<blockquote class="mihuang">
+  <strong>口诀</strong>:脱敏不做等于裸奔,异步不开等于卡死,MDC 不清等于串号,切割不配等于爆盘,DEBUG 不开等于盲飞。
+</blockquote>
+
+<h2>10. 速查表</h2>
+
+<table>
+<thead><tr><th>需求</th><th>配置项</th><th>位置</th></tr></thead>
+<tbody>
+<tr><td>纯 Java 开启请求日志</td><td><code>.logRequests(true)</code></td><td>OpenAiChatModel.Builder</td></tr>
+<tr><td>纯 Java 开启响应日志</td><td><code>.logResponses(true)</code></td><td>OpenAiChatModel.Builder</td></tr>
+<tr><td>Spring Boot 开启</td><td><code>langchain4j.open-ai.chat-model.log-requests=true</code></td><td>application.properties</td></tr>
+<tr><td>Spring Boot 开启</td><td><code>langchain4j.open-ai.chat-model.log-responses=true</code></td><td>application.properties</td></tr>
+<tr><td>Spring Boot 看 prompt</td><td><code>logging.level.dev.langchain4j=DEBUG</code></td><td>application.properties</td></tr>
+<tr><td>Quarkus 开启</td><td><code>quarkus.langchain4j.openai.chat-model.log-requests=true</code></td><td>application.properties</td></tr>
+<tr><td>Quarkus 包级别</td><td><code>quarkus.log.category."dev.langchain4j".level=DEBUG</code></td><td>application.properties</td></tr>
+<tr><td>Logback 异步</td><td><code>AsyncAppender</code> + <code>queueSize=2048</code></td><td>logback.xml</td></tr>
+<tr><td>MDC traceId</td><td><code>MDC.put("traceId", uuid)</code></td><td>拦截器 / Filter</td></tr>
+<tr><td>日志切割</td><td><code>TimeBasedRollingPolicy</code></td><td>logback.xml</td></tr>
+<tr><td>JSON 输出</td><td><code>JsonEncoder</code></td><td>logback.xml</td></tr>
+<tr><td>敏感脱敏</td><td>自定义 <code>PatternLayout.doLayout()</code> 正则替换</td><code></td><td>MaskingLayout.java</td></tr>
+</tbody>
+</table>
+
+<h2>11. 本章小结</h2>
+
+<ul>
+  <li><strong>3 个开关</strong>:<code>logRequests</code> / <code>logResponses</code> / <code>logRequestsAndResponses</code>,生产<strong>必开</strong></li>
+  <li><strong>3 套集成</strong>:纯 Java(Builder)/ Spring Boot(properties + logback-spring.xml)/ Quarkus(quarkus.log.*)</li>
+  <li><strong>SLF4J 门面</strong>:LangChain4j 只认 SLF4J,后端可换 Logback / Log4j2 / JBoss LogManager</li>
+  <li><strong>生产五件套</strong>:开启开关 + Logback 双格式 + MDC traceId + MaskingLayout 脱敏 + AsyncAppender 异步</li>
+  <li><strong>DEBUG 级别</strong>:看 prompt/response 必须开 <code>dev.langchain4j</code> DEBUG,否则只看到 "Request sent" 一行</li>
+</ul>
+
+<hr>
+<p class="footer-src">📖 本章基于官方文档:<a href="file:///E:/hermes_chat/langchain4j-html/Logging%20_LangChain4j.html">Logging _ LangChain4j.html</a> 提炼 + 实战扩展 · 内容仅基于 LangChain4j 官方资料,不与其他框架混搭</p>
+
+</main>
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

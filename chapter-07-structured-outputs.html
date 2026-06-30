@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch07 · Structured Outputs · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">JSON Schema · POJO 映射</span>
+    <h1><span class="num">07</span>Structured Outputs(结构化输出)</h1>
+    <p class="lead">LLM 默认返回<strong>自由文本</strong>,你要写正则去抠 JSON。<code>JsonSchema</code> 告诉模型"按这个 schema 输出",LangChain4j <strong>自动解析成你的 POJO</strong>。AI Service 模式下连 schema 都<strong>自动生成</strong>。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:<code>Person</code> 是 record,interface 方法返回 <code>Person</code> —— LangChain4j 自动生成 <code>Person</code> 的 JSON Schema 发给模型,模型按 schema 输出 JSON,LangChain4j 反序列化成 <code>Person</code> 对象给你。零样板。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>老板:"我们做简历解析,从一段自我介绍里抽出姓名、年龄、身高、婚否,塞到数据库。"</p>
+  <p>正则解析非结构化文本 = 噩梦。JSON Schema 让模型按<strong>规定字段</strong>输出,程序<strong>直接拿对象</strong>。</p>
+
+  <h3>3 个真实场景</h3>
+  <ul>
+    <li><strong>简历/合同解析</strong> — 一段非结构化文本 → POJO</li>
+    <li><strong>AI 表单填写</strong> — 用户口述 → 结构化字段</li>
+    <li><strong>批量信息抽取</strong> — 1000 条新闻 → List&lt;NewsItem&gt;</li>
+  </ul>
+
+  <h2>2. 3 种实现方式(从可靠到不可靠)</h2>
+  <table>
+    <thead>
+      <tr><th>方式</th><th>可靠度</th><th>适用</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>JSON Schema</strong>(厂商原生支持)</td><td>⭐⭐⭐</td><td>OpenAI / Gemini / Mistral / Bedrock / Ollama</td></tr>
+      <tr><td><strong>JSON mode</strong>(responseFormat=json)</td><td>⭐⭐</td><td>只保证是 JSON,字段不约束</td></tr>
+      <tr><td><strong>Prompt 指令</strong>("请输出 JSON")</td><td>⭐</td><td>老模型兜底,生产慎用</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 入门 Person record + PersonExtractor</h2>
+  <p>AI Service 模式最简形态 —— 定义 record + interface,LangChain4j 全自动:</p>
+  <pre><code><span class="cm">// 1. 定义 record(数据载体)</span>
+<span class="kw">record</span> <span class="ty">Person</span>(<span class="ty">String</span> name, <span class="ty">int</span> age, <span class="ty">double</span> height, <span class="ty">boolean</span> married) {}
+
+<span class="cm">// 2. 定义 interface(返回 Person)</span>
+<span class="kw">interface</span> <span class="ty">PersonExtractor</span> {
+    <span class="ty">Person</span> <span class="fn">extractPersonFrom</span>(<span class="ty">String</span> text);
+}
+
+<span class="cm">// 3. 配置 ChatModel 开启 JSON Schema</span>
+<span class="ty">ChatModel</span> chatModel = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+        .<span class="fn">apiKey</span>(<span class="ty">System</span>.<span class="fn">getenv</span>(<span class="st">"OPENAI_API_KEY"</span>))
+        .<span class="fn">modelName</span>(<span class="st">"gpt-4o-mini"</span>)
+        .<span class="fn">supportedCapabilities</span>(<span class="ty">RESPONSE_FORMAT_JSON_SCHEMA</span>)   <span class="cm">// ⭐ 关键</span>
+        .<span class="fn">strictJsonSchema</span>(<span class="kw">true</span>)                              <span class="cm">// ⭐ 关键</span>
+        .<span class="fn">build</span>();
+
+<span class="cm">// 4. 创建 extractor + 调用</span>
+<span class="ty">PersonExtractor</span> extractor = <span class="ty">AiServices</span>.<span class="fn">create</span>(<span class="ty">PersonExtractor</span>.<span class="kw">class</span>, chatModel);
+<span class="ty">Person</span> p = extractor.<span class="fn">extractPersonFrom</span>(<span class="st">"John is 42 years old..."</span>);
+<span class="ty">System</span>.<span class="fn">out</span>.<span class="fn">println</span>(p.name());   <span class="cm">// → "John"</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout warn">
+    <p><strong>⚠️ 关键开关</strong>:<code>supportedCapabilities(RESPONSE_FORMAT_JSON_SCHEMA)</code> + <code>strictJsonSchema(true)</code> <strong>必须显式打开</strong>,默认是关闭的。开错 = 模型不按 schema 输出,反序列化失败。</p>
+  </div>
+
+  <h2>4. 底层 API 写法(不用 AI Service)</h2>
+  <p>如果用 ch01 的 <code>ChatModel</code> 底层 API,手动构造 <code>ResponseFormat</code>:</p>
+  <pre><code><span class="ty">ResponseFormat</span> responseFormat = <span class="ty">ResponseFormat</span>.<span class="fn">builder</span>()
+        .<span class="fn">type</span>(<span class="ty">JSON</span>)
+        .<span class="fn">jsonSchema</span>(<span class="ty">JsonSchema</span>.<span class="fn">builder</span>()
+            .<span class="fn">name</span>(<span class="st">"Person"</span>)                              <span class="cm">// OpenAI 必填</span>
+            .<span class="fn">rootElement</span>(<span class="ty">JsonObjectSchema</span>.<span class="fn">builder</span>()
+                .<span class="fn">addStringProperty</span>(<span class="st">"name"</span>, <span class="st">"The person's name"</span>)
+                .<span class="fn">addIntegerProperty</span>(<span class="st">"age"</span>, <span class="st">"The person's age"</span>)
+                .<span class="fn">addNumberProperty</span>(<span class="st">"height"</span>, <span class="st">"Height in meters"</span>)
+                .<span class="fn">addBooleanProperty</span>(<span class="st">"married"</span>, <span class="st">"Marital status"</span>)
+                .<span class="fn">required</span>(<span class="st">"name"</span>, <span class="st">"age"</span>)
+                .<span class="fn">build</span>())
+            .<span class="fn">build</span>())
+        .<span class="fn">build</span>();
+
+<span class="ty">ChatRequest</span> request = <span class="ty">ChatRequest</span>.<span class="fn">builder</span>()
+        .<span class="fn">messages</span>(<span class="ty">UserMessage</span>.<span class="fn">from</span>(<span class="st">"John is 42 years old..."</span>))
+        .<span class="fn">responseFormat</span>(responseFormat)
+        .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>5. 10 个 JsonSchemaElement 类型</h2>
+  <p>构建 JSON Schema 的"积木块":</p>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>对应 Java</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>JsonObjectSchema</code></td><td>对象 / record</td><td><code>Person{name, age}</code></td></tr>
+      <tr><td><code>JsonStringSchema</code></td><td>String</td><td><code>"John"</code></td></tr>
+      <tr><td><code>JsonIntegerSchema</code></td><td>int / long</td><td><code>42</code></td></tr>
+      <tr><td><code>JsonNumberSchema</code></td><td>double / BigDecimal</td><td><code>1.75</code></td></tr>
+      <tr><td><code>JsonBooleanSchema</code></td><td>boolean</td><td><code>true</code></td></tr>
+      <tr><td><code>JsonEnumSchema</code></td><td>enum</td><td><code>"SINGLE" / "MARRIED"</code></td></tr>
+      <tr><td><code>JsonArraySchema</code></td><td>List&lt;T&gt;</td><td><code>[1, 2, 3]</code></td></tr>
+      <tr><td><code>JsonAnyOfSchema</code></td><td>多态</td><td><code>Dog | Cat</code></td></tr>
+      <tr><td><code>JsonReferenceSchema</code></td><td>$ref 引用</td><td>递归结构</td></tr>
+      <tr><td><code>JsonRawSchema</code></td><td>已有 schema 字符串</td><td>导入外部 JSON Schema</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. 实战:多态 Animal 抽取(sealed interface)</h2>
+  <p>Java 17+ 的 <code>sealed interface</code> 天然支持多态抽取 —— LangChain4j 自动加 <code>type</code> 判别字段:</p>
+  <pre><code><span class="kw">sealed interface</span> <span class="ty">Animal</span> <span class="kw">permits</span> <span class="ty">Dog</span>, <span class="ty">Cat</span> {}
+<span class="kw">record</span> <span class="ty">Dog</span>(<span class="ty">String</span> name, <span class="ty">String</span> breed) <span class="kw">implements</span> <span class="ty">Animal</span> {}
+<span class="kw">record</span> <span class="ty">Cat</span>(<span class="ty">String</span> name, <span class="ty">boolean</span> indoor) <span class="kw">implements</span> <span class="ty">Animal</span> {}
+
+<span class="kw">interface</span> <span class="ty">AnimalExtractor</span> {
+    <span class="ty">Animal</span> <span class="fn">extractAnimalFrom</span>(<span class="ty">String</span> text);
+}
+
+<span class="cm">// 模型输出:{"value":{"type":"Dog","name":"Rex","breed":"Labrador"}}</span>
+<span class="cm">// LangChain4j 自动反序列化成 Dog 实例(不是 Animal!)</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>7. @Description 防幻觉</h2>
+  <p>LLM 经常"瞎填"(姓名不知道就填 "John Doe")。用 <code>@Description</code> 给字段加示例:</p>
+  <pre><code><span class="at">@Description</span>(<span class="st">"a person"</span>)
+<span class="kw">record</span> <span class="ty">Person</span>(
+    <span class="at">@Description</span>(<span class="st">"person's first and last name, for example: John Doe"</span>) <span class="ty">String</span> name,
+    <span class="at">@Description</span>(<span class="st">"person's age, for example: 42"</span>) <span class="ty">int</span> age,
+    <span class="at">@Description</span>(<span class="st">"person's height in meters, for example: 1.78"</span>) <span class="ty">double</span> height,
+    <span class="at">@Description</span>(<span class="st">"true if married, false otherwise"</span>) <span class="ty">boolean</span> married
+) {}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>8. 必填字段控制</h2>
+  <p>默认<strong>所有字段 optional</strong>(LangChain4j 防 LLM 瞎填)。要必填用 <code>@JsonProperty(required = true)</code>:</p>
+  <pre><code><span class="kw">record</span> <span class="ty">Person</span>(
+    <span class="at">@JsonProperty</span>(required = <span class="kw">true</span>) <span class="ty">String</span> name,    <span class="cm">// 必填,缺了 LLM 会被强制重试</span>
+    <span class="ty">String</span> surname                                       <span class="cm">// 可选,缺了默认 null</span>
+) {}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout warn">
+    <p><strong>⚠️ Optional 字段的坑</strong>:基本类型(int / boolean)即使 optional,LLM 漏传时 LangChain4j 会用默认值(0 / false)。你以为"没填",其实是 0。设计 POJO 时:<strong>用包装类型 Integer / Boolean</strong>,让 null 真的能表示"没填"。</p>
+  </div>
+
+  <h2>9. 选型决策树</h2>
+  <div class="svg-box">
+    <svg viewBox="0 0 720 240" xmlns="http://www.w3.org/2000/svg">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">"我该用 JSON Schema 还是 JSON mode 还是 prompt?"</text>
+
+      <rect x="280" y="40" width="160" height="36" rx="8" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+      <text x="360" y="62" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">看厂商</text>
+
+      <line x1="360" y1="76" x2="120" y2="120" stroke="#94a3b8" stroke-width="1"/>
+      <line x1="360" y1="76" x2="600" y2="120" stroke="#94a3b8" stroke-width="1"/>
+
+      <text x="220" y="100" font-size="12" font-weight="600" fill="#15803d">OpenAI/Gemini/Mistral/Bedrock</text>
+      <text x="500" y="100" font-size="12" font-weight="600" fill="#b45309">老模型 / 不支持 schema</text>
+
+      <rect x="40" y="130" width="160" height="80" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+      <text x="120" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">JSON Schema</text>
+      <text x="120" y="172" text-anchor="middle" font-size="11" fill="#334155">· 字段强约束</text>
+      <text x="120" y="188" text-anchor="middle" font-size="11" fill="#334155">· 可靠度最高</text>
+      <text x="120" y="204" text-anchor="middle" font-size="11" fill="#334155">· ⭐ 99% 场景</text>
+
+      <rect x="520" y="130" width="160" height="80" rx="8" fill="#fff4e6" stroke="#e07a3b" stroke-width="1"/>
+      <text x="600" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#b45309">JSON mode + prompt</text>
+      <text x="600" y="172" text-anchor="middle" font-size="11" fill="#334155">· 兜底方案</text>
+      <text x="600" y="188" text-anchor="middle" font-size="11" fill="#334155">· 字段不严格</text>
+      <text x="600" y="204" text-anchor="middle" font-size="11" fill="#334155">· 解析自己写</text>
+    </svg>
+  </div>
+
+  <h2>10. 避坑指南</h2>
+
+  <div class="pitfall">
+    <h3>坑 1 · 忘了开 supportedCapabilities + strictJsonSchema</h3>
+    <p>OpenAI 默认<strong>不开</strong> JSON Schema 模式。光写 <code>strictJsonSchema(true)</code> 不开 capabilities = 直接报错。两个开关必须一起写,且要 OpenAI 文档说支持该模型的对应模式。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 2 · 默认所有字段 optional = 大量 null</h3>
+    <p>LangChain4j 默认<strong>所有字段 optional</strong>(防 LLM 瞎填,但代价是字段大量 null)。如果业务需要必填(如订单号),加 <code>@JsonProperty(required = true)</code>。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 3 · 枚举 strict 模式仍可能幻觉</h3>
+    <p><code>strictJsonSchema(true)</code> 对 string/integer 字段管用,但<strong>enum 字段仍可能被填"近似值"</strong>(如 enum 是 ["RED","GREEN","BLUE"],模型填 "PURPLE" 仍可能通过 schema 校验)。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 4 · 多态 anyOf 厂商支持差</h3>
+    <p><code>JsonAnyOfSchema</code>(多态)在 OpenAI 一些模型上不支持根级 anyOf。LangChain4j 用 <code>{"value":{...}}</code> 包装绕过,但这意味着你的 Java 代码反序列化时要 unwrap —— 实际是 LangChain4j 自动做的,你不用管,但要<strong>知道这件事</strong>。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 5 · 复杂 record 嵌套 = schema 无限大</h3>
+    <p>递归 POJO(<code>Person { List&lt;Person&gt; children }</code>)OpenAI 之外的厂商大多不支持。LangChain4j 会<strong>启动时直接报错</strong>给你,而不是运行时炸 —— 看启动日志。</p>
+  </div>
+
+  <h2>11. 记忆口诀</h2>
+  <div class="mnemonic">
+    <h3>🎓 4 行口诀</h3>
+    <pre>三种方式 Schema 模式 Prompt, 可靠度从高到低
+AI Service 模式最省事, interface 返回 POJO 自动生成 schema
+两开关 supportedCapabilities + strictJsonSchema, 不开就报错
+字段默认全 optional, 必填靠 @JsonProperty, 防止幻觉靠 @Description</pre>
+  </div>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 基础篇 · ch07 v1 浅版 · 源:<code>Structured Outputs _ LangChain4j.html</code>(1.7MB / 75 段)</p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

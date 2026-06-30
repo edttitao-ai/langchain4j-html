@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch03 · Model Parameters · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">参数调优 · temperature / topP / maxTokens</span>
+    <h1><span class="num">03</span>Model Parameters(模型参数)</h1>
+    <p class="lead">同样的 prompt,<code>temperature=0.3</code> 和 <code>1.5</code> 输出天差地别。本章讲 LangChain4j 的<strong>2 种调参方式</strong>(Builder / 配置文件)+ 6 个最常用参数。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:模型参数 = 调<strong>创造力 / 长度 / 速度 / 成本</strong>的旋钮。LangChain4j 统一 Builder 模式,各厂商<strong>参数名略有差异</strong>,但 OpenAI 那套 6 个是行业标准。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>老板:"为什么这个 AI 客服每次回答都不同?有时给长答案,有时一句话?"</p>
+  <p>根因:<strong><code>temperature</code></strong>(温度)参数没设。默认 1.0 = 模型"自由发挥"。调到 0.3 = 答案稳定 + 偏短。</p>
+  <p>调参不是开发,是<strong>产品设计</strong>。要回答"客服要稳要准"、"写作助手要发散要长"这种产品决策。</p>
+
+  <h3>3 个真实场景的参数选择</h3>
+  <ul>
+    <li><strong>AI 客服 / 代码补全</strong> — <code>temperature=0.0~0.3</code>(要稳定,要准)</li>
+    <li><strong>AI 写作 / 营销文案</strong> — <code>temperature=0.7~1.2</code>(要发散,要创意)</li>
+    <li><strong>JSON 抽取 / 分类</strong> — <code>temperature=0</code> + <code>responseFormat=json</code>(要结构化,要可解析)</li>
+  </ul>
+
+  <h2>2. 核心概念</h2>
+  <p>模型参数定义 3 件事:</p>
+  <ul>
+    <li><strong>创造性</strong> — <code>temperature</code> / <code>topP</code>(越高越"天马行空")</li>
+    <li><strong>长度</strong> — <code>maxTokens</code> / <code>maxCompletionTokens</code>(回答上限)</li>
+    <li><strong>成本与速度</strong> — <code>timeout</code> / <code>logRequests</code>(调试 / 限流)</li>
+  </ul>
+
+  <h2>3. 2 种调参方式</h2>
+
+  <h3>方式 ① Builder 模式(代码硬编码)</h3>
+  <pre><code><span class="ty">OpenAiChatModel</span> model = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+        .<span class="fn">apiKey</span>(<span class="ty">System</span>.<span class="fn">getenv</span>(<span class="st">"OPENAI_API_KEY"</span>))
+        .<span class="fn">modelName</span>(<span class="st">"gpt-4o-mini"</span>)
+        .<span class="fn">temperature</span>(<span class="nm">0.3</span>)        <span class="cm">// 温度(0-2,越高越发散)</span>
+        .<span class="fn">topP</span>(<span class="nm">0.9</span>)               <span class="cm">// 核采样(0-1,跟 temperature 二选一调)</span>
+        .<span class="fn">maxTokens</span>(<span class="nm">2048</span>)          <span class="cm">// 回答最大 token 数</span>
+        .<span class="fn">timeout</span>(<span class="ty">Duration</span>.<span class="fn">ofSeconds</span>(<span class="nm">60</span>))
+        .<span class="fn">logRequests</span>(<span class="kw">true</span>)         <span class="cm">// 打印请求体(调试用)</span>
+        .<span class="fn">logResponses</span>(<span class="kw">true</span>)        <span class="cm">// 打印响应体</span>
+        .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h3>方式 ② 配置文件(推荐,Quarkus)</h3>
+  <pre><code><span class="cm"># application.properties (Quarkus)</span>
+quarkus.langchain4j.openai.api-key=${OPENAI_API_KEY}
+quarkus.langchain4j.openai.chat-model.temperature=<span class="nm">0.5</span>
+quarkus.langchain4j.openai.chat-model.max-tokens=<span class="nm">2048</span>
+quarkus.langchain4j.openai.timeout=60s</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h3>方式 ② 配置(Spring Boot)</h3>
+  <pre><code><span class="cm"># application.properties (Spring Boot)</span>
+langchain4j.open-ai.chat-model.api-key=${OPENAI_API_KEY}
+langchain4j.open-ai.chat-model.model-name=gpt-4-1106-preview
+langchain4j.open-ai.chat-model.temperature=<span class="nm">0.3</span>
+langchain4j.open-ai.chat-model.max-tokens=<span class="nm">1024</span>
+langchain4j.open-ai.chat-model.timeout=60s</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout tip">
+    <p><strong>💡 推荐做法</strong>:<strong>开发期</strong>用 Builder 调,IDE 提示全; <strong>生产期</strong>用配置文件,改参数不用重打包,运维直接调。</p>
+  </div>
+
+  <h2>4. 6 个最常用参数(OpenAI 体系)</h2>
+  <table>
+    <thead>
+      <tr><th>参数</th><th>范围</th><th>作用</th><th>推荐值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>temperature</code></td><td>0.0 ~ 2.0</td><td>采样温度,越高越发散</td><td>客服 0.3 / 写作 0.9</td></tr>
+      <tr><td><code>topP</code></td><td>0.0 ~ 1.0</td><td>核采样,累积概率阈值</td><td>0.9(跟 temperature 选一个)</td></tr>
+      <tr><td><code>maxTokens</code></td><td>1 ~ 模型上限</td><td>回答最大 token 数</td><td>短答 256 / 长答 2048</td></tr>
+      <tr><td><code>timeout</code></td><td>Duration</td><td>HTTP 调用的最长等待</td><td>30s ~ 120s</td></tr>
+      <tr><td><code>logRequests</code></td><td>boolean</td><td>是否打印请求日志</td><td>true(开发)/ false(生产)</td></tr>
+      <tr><td><code>logResponses</code></td><td>boolean</td><td>是否打印响应日志</td><td>true(开发)/ false(生产)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. 不同厂商参数差异</h2>
+  <p>LangChain4j 适配 30+ 厂商,大部分参数<strong>名相同</strong>但行为有差:</p>
+  <ul>
+    <li><strong>OpenAI / 通义千问 / 智谱 GLM</strong> — temperature 范围 <code>0~2</code></li>
+    <li><strong>Anthropic Claude</strong> — temperature 范围 <code>0~1</code>(超过 1 报错)</li>
+    <li><strong>本地 Ollama</strong> — 部分模型不支持 <code>topP</code></li>
+  </ul>
+
+  <h2>6. 选型决策树</h2>
+  <div class="svg-box">
+    <svg viewBox="0 0 720 240" xmlns="http://www.w3.org/2000/svg">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">"我要不要传 maxTokens?"</text>
+
+      <rect x="280" y="40" width="160" height="36" rx="8" fill="#e6efff" stroke="#2f6feb" stroke-width="1.5"/>
+      <text x="360" y="62" text-anchor="middle" font-size="12" font-weight="600" fill="#1e54d4">决定传不传</text>
+
+      <line x1="360" y1="76" x2="120" y2="120" stroke="#94a3b8" stroke-width="1"/>
+      <line x1="360" y1="76" x2="600" y2="120" stroke="#94a3b8" stroke-width="1"/>
+
+      <text x="220" y="100" font-size="12" font-weight="600" fill="#15803d">不传(默认模型上限)</text>
+      <text x="500" y="100" font-size="12" font-weight="600" fill="#b45309">要传(显式限制)</text>
+
+      <rect x="40" y="130" width="160" height="80" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+      <text x="120" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">不传的场景</text>
+      <text x="120" y="172" text-anchor="middle" font-size="11" fill="#334155">· 短答/一次性 prompt</text>
+      <text x="120" y="188" text-anchor="middle" font-size="11" fill="#334155">· 不在乎费用</text>
+      <text x="120" y="204" text-anchor="middle" font-size="11" fill="#334155">· 写作类,要长文</text>
+
+      <rect x="520" y="130" width="160" height="80" rx="8" fill="#fff4e6" stroke="#e07a3b" stroke-width="1"/>
+      <text x="600" y="152" text-anchor="middle" font-size="12" font-weight="700" fill="#b45309">要传的场景</text>
+      <text x="600" y="172" text-anchor="middle" font-size="11" fill="#334155">· 分类/抽取,短答即可</text>
+      <text x="600" y="188" text-anchor="middle" font-size="11" fill="#334155">· 控制成本(按 token 收费)</text>
+      <text x="600" y="204" text-anchor="middle" font-size="11" fill="#334155">· 防模型跑偏无限长</text>
+    </svg>
+  </div>
+
+  <h2>7. 避坑指南</h2>
+
+  <div class="pitfall">
+    <h3>坑 1 · temperature 不要超过 1.5</h3>
+    <p>超过 1.5 模型开始<strong>胡言乱语</strong>(语法都不通)。如果你想要"更发散",调 <code>topP=0.95</code> 比调 <code>temperature=1.8</code> 更可控。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 2 · logRequests 生产打开 = 信息泄露</h3>
+    <p>开启 <code>logRequests(true)</code> 会把<strong>完整 prompt 打到日志</strong>。如果 prompt 里有用户隐私(手机号 / 身份证),直接上 ELK / 云日志 = 灾难。生产永远 false。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 3 · timeout 短了 → 长答直接失败</h3>
+    <p>复杂 prompt(几千字输入)模型生成要 30-60 秒。timeout 设 10 秒 = 一半请求超时。生产建议 60s,流式输出可以更低(15s,看第一个 token)。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 4 · temperature 和 topP 不要同时大</h3>
+    <p>官方建议:两个参数<strong>二选一调</strong>。都调到 1.0 = 双重发散 = 答案混乱。经验:调 temperature,topP 保持 0.9-0.95。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 5 · Quarkus Dev UI 可改参数但不会写回代码</h3>
+    <p>Quarkus 提供一个开发期 UI(<code>quarkus dev</code> 后访问 <code>/q/dev-ui</code>),可以调参数看效果。<strong>但改了只对运行实例生效,不会写回 application.properties</strong>。验证完别忘了手动改配置文件。</p>
+  </div>
+
+  <h2>8. 记忆口诀</h2>
+  <div class="mnemonic">
+    <h3>🎓 4 行口诀</h3>
+    <pre>三件事 创造性 长度 速度, 六参数 调温 核采 限长 超时 日志
+Builder 写代码调, application.properties 运维改
+客服 0.3 写作 0.9, 分类抽取温度归零
+logRequests 永远生产关, timeout 长答要 60 秒</pre>
+  </div>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 基础篇 · ch03 v1 浅版 · 源:<code>Model Parameters _ LangChain4j.html</code></p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>

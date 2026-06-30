@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ch05 · AI Services · LangChain4j</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-tag">门面接口 · 声明式 AI 代理</span>
+    <h1><span class="num">05</span>AI Services(高级门面 API)</h1>
+    <p class="lead">ch01-04 你写的是<strong>底层调用</strong>(Builder + chat)。<code>AI Services</code> 是 LangChain4j 推荐的<strong>高级门面</strong>——你<strong>只写 interface</strong>,LangChain4j 给你动态代理实现。类比 Spring Data JPA / Retrofit。</p>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="callout info">
+    <p><strong>一句话定性</strong>:<code>AiServices.create(Interface.class, chatModel)</code> 返回 interface 的代理对象。方法签名 = API,注解 = 配置。LangChain4j 自动处理 prompt 拼装 + memory + tools + 流式。</p>
+  </div>
+
+  <h2>1. 业务场景</h2>
+  <p>老板:"我们 AI 客服项目有 20 个功能(分类/抽取/闲聊/翻译/总结...),每个功能都要写一遍 Builder + chat,代码重复得想哭。"</p>
+  <p><strong>解法</strong>:每个功能<strong>只写 interface 一个方法</strong>,LangChain4j 用 JDK 动态代理自动实现。</p>
+
+  <h3>5 个 AI Services 能解决的事</h3>
+  <ul>
+    <li><strong>统一入口</strong> — 一个 <code>Assistant</code> 接口代替一堆 Builder</li>
+    <li><strong>System 提示词模板</strong> — <code>@SystemMessage("你是 Java 专家")</code></li>
+    <li><strong>多用户记忆隔离</strong> — <code>@MemoryId</code> + <code>ChatMemoryProvider</code></li>
+    <li><strong>工具调用</strong> — <code>.tools(new MyTools())</code></li>
+    <li><strong>RAG</strong> — <code>.contentRetriever(...)</code>(把检索当工具)</li>
+  </ul>
+
+  <h2>2. 核心概念:动态代理</h2>
+  <p>跟 Spring Data JPA、Retrofit 同思路:</p>
+
+  <pre><code><span class="cm">// 1. 你只写 interface(声明式)</span>
+<span class="kw">interface</span> <span class="ty">Assistant</span> {
+    <span class="ty">String</span> <span class="fn">chat</span>(<span class="ty">String</span> userMessage);
+}
+
+<span class="cm">// 2. LangChain4j 反射 + JDK Proxy 实现它</span>
+<span class="ty">ChatModel</span> model = <span class="ty">OpenAiChatModel</span>.<span class="fn">builder</span>()
+        .<span class="fn">apiKey</span>(<span class="ty">System</span>.<span class="fn">getenv</span>(<span class="st">"OPENAI_API_KEY"</span>))
+        .<span class="fn">modelName</span>(<span class="st">"gpt-4o-mini"</span>)
+        .<span class="fn">build</span>();
+
+<span class="ty">Assistant</span> assistant = <span class="ty">AiServices</span>.<span class="fn">create</span>(<span class="ty">Assistant</span>.<span class="kw">class</span>, model);
+
+<span class="cm">// 3. 跟普通方法一样调用,LangChain4j 在背后拼 prompt + 调 chat + 处理结果</span>
+<span class="ty">String</span> answer = assistant.<span class="fn">chat</span>(<span class="st">"Hello"</span>);   <span class="cm">// → "Hello, how can I help you?"</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>3. 6 个最常用注解</h2>
+  <table>
+    <thead>
+      <tr><th>注解</th><th>位置</th><th>作用</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>@SystemMessage</code></td><td>方法</td><td>系统提示词,可写死 / 模板 / 读资源文件</td></tr>
+      <tr><td><code>@UserMessage</code></td><td>方法 / 参数</td><td>用户消息模板,支持 <code>{{it}}</code> / <code>{{变量}}</code></td></tr>
+      <tr><td><code>@V("name")</code></td><td>参数</td><td>自定义模板变量名(<code>{{name}}</code> 引用)</td></tr>
+      <tr><td><code>@MemoryId</code></td><td>参数</td><td>多用户/多会话记忆的 key</td></tr>
+      <tr><td><code>@Tool</code></td><td>方法</td><td>把方法暴露给 LLM 调用(下章详讲)</td></tr>
+      <tr><td><code>@ToolMemoryId</code></td><td>方法参数</td><td>工具调用时也能拿到 memoryId</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 注解实战(@SystemMessage + @UserMessage)</h2>
+  <p>用"朋友"角色扮演做示例:</p>
+  <pre><code><span class="kw">interface</span> <span class="ty">Friend</span> {
+    <span class="at">@SystemMessage</span>(<span class="st">"You are a good friend of mine. Answer using slang."</span>)
+    <span class="ty">String</span> <span class="fn">chat</span>(<span class="ty">String</span> userMessage);
+}
+
+<span class="ty">Friend</span> friend = <span class="ty">AiServices</span>.<span class="fn">create</span>(<span class="ty">Friend</span>.<span class="kw">class</span>, model);
+<span class="ty">String</span> answer = friend.<span class="fn">chat</span>(<span class="st">"Hello"</span>);  <span class="cm">// → "Hey! What's up?"</span></code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <p>用 <code>{{it}}</code> 模板,把参数嵌入 UserMessage:</p>
+  <pre><code><span class="kw">interface</span> <span class="ty">Friend</span> {
+    <span class="at">@UserMessage</span>(<span class="st">"You are a good friend. Answer using slang. {{it}}"</span>)
+    <span class="ty">String</span> <span class="fn">chat</span>(<span class="ty">String</span> userMessage);
+}
+
+<span class="cm">// 改用 @V 自定义变量名</span>
+<span class="kw">interface</span> <span class="ty">Friend</span> {
+    <span class="at">@UserMessage</span>(<span class="st">"你是我的好朋友,回答用俚语。{{message}}"</span>)
+    <span class="ty">String</span> <span class="fn">chat</span>(<span class="at">@V</span>(<span class="st">"message"</span>) <span class="ty">String</span> userMessage);
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout tip">
+    <p><strong>💡 提示</strong>:<code>@SystemMessage(fromResource = "my-prompt.txt")</code> 可以从 classpath 读 prompt 模板文件,<strong>生产推荐</strong>——改 prompt 不用重编译。</p>
+  </div>
+
+  <h2>5. 多用户记忆隔离(@MemoryId + ChatMemoryProvider)</h2>
+  <p>电商客服多用户同时聊,每个用户独立 memory,关键就 2 行:</p>
+  <pre><code><span class="kw">interface</span> <span class="ty">Assistant</span> {
+    <span class="ty">String</span> <span class="fn">chat</span>(<span class="at">@MemoryId</span> <span class="ty">int</span> memoryId, <span class="at">@UserMessage</span> <span class="ty">String</span> message);
+}
+
+<span class="ty">Assistant</span> assistant = <span class="ty">AiServices</span>.<span class="fn">builder</span>(<span class="ty">Assistant</span>.<span class="kw">class</span>)
+        .<span class="fn">chatModel</span>(model)
+        .<span class="fn">chatMemoryProvider</span>(memoryId -&gt; <span class="ty">MessageWindowChatMemory</span>.<span class="fn">withMaxMessages</span>(<span class="nm">10</span>))
+        .<span class="fn">build</span>();
+
+<span class="cm">// 用户 1 说话,只影响 memoryId=1 的会话</span>
+<span class="ty">String</span> a1 = assistant.<span class="fn">chat</span>(<span class="nm">1</span>, <span class="st">"你好,我叫 Klaus"</span>);
+<span class="cm">// 用户 2 说话,只影响 memoryId=2 的会话,互不串扰</span>
+<span class="ty">String</span> a2 = assistant.<span class="fn">chat</span>(<span class="nm">2</span>, <span class="st">"你好,我叫 Francine"</span>);</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout warn">
+    <p><strong>⚠️ 警告</strong>:官方明示 —— 同一 <code>@MemoryId</code> 的 AI Service <strong>不能并发调用</strong>,会导致 ChatMemory 损坏(列表被两个线程同时改)。生产用线程池隔离,或者外部加锁。</p>
+  </div>
+
+  <h2>6. 接入工具 / RAG / 审核</h2>
+  <p>AI Services 几乎所有 ch01-04 的能力都能用一行 builder 接入:</p>
+  <pre><code><span class="ty">Assistant</span> assistant = <span class="ty">AiServices</span>.<span class="fn">builder</span>(<span class="ty">Assistant</span>.<span class="kw">class</span>)
+        .<span class="fn">chatModel</span>(model)
+        .<span class="fn">chatMemoryProvider</span>(memoryId -&gt; <span class="ty">MessageWindowChatMemory</span>.<span class="fn">withMaxMessages</span>(<span class="nm">10</span>))
+        .<span class="fn">tools</span>(<span class="kw">new</span> <span class="ty">MyTools</span>())                                <span class="cm">// 工具调用(ch06 详讲)</span>
+        .<span class="fn">contentRetriever</span>(<span class="ty">EmbeddingStoreContentRetriever</span>...)    <span class="cm">// RAG 检索(高级篇)</span>
+        .<span class="fn">moderationModel</span>(moderationModel)                          <span class="cm">// 内容审核(自动拦截违规)</span>
+        .<span class="fn">build</span>();</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <h2>7. AI Services 返回类型</h2>
+  <p>方法返回类型决定行为:</p>
+  <ul>
+    <li><code>String</code> — 纯文本回答</li>
+    <li><code>boolean / int / enum</code> — 分类 / 抽取(自动 JSON 解析)</li>
+    <li><code>POJO</code> — 复杂结构(自动 JSON → 对象映射)</li>
+    <li><code>List&lt;POJO&gt;</code> — 列表</li>
+    <li><code>Result&lt;T&gt;</code> — 包一层,带 token 用量 / finishReason 等元数据</li>
+    <li><code>TokenStream</code> — 流式输出(接 ch04)</li>
+    <li><code>Flux&lt;String&gt;</code> — Reactor 响应式流(需 <code>langchain4j-reactor</code> 模块)</li>
+  </ul>
+
+  <h2>8. 实战:Miles of Smiles 多 AI 服务拆分</h2>
+  <p>官方推荐的"小而专"思路 —— 把复杂业务拆成 2+ 个 AI Service 各自测试:</p>
+  <pre><code><span class="cm">// 子服务 1:只判断用户是否打招呼(走 LLM)</span>
+<span class="kw">interface</span> <span class="ty">GreetingExpert</span> {
+    <span class="at">@UserMessage</span>(<span class="st">"Is the following text a greeting? Text: {{it}}"</span>)
+    <span class="ty">boolean</span> <span class="fn">isGreeting</span>(<span class="ty">String</span> text);
+}
+
+<span class="cm">// 子服务 2:正式聊天(带 RAG 知识库)</span>
+<span class="kw">interface</span> <span class="ty">ChatBot</span> {
+    <span class="at">@SystemMessage</span>(<span class="st">"You are a polite chatbot of a company called Miles of Smiles."</span>)
+    <span class="ty">String</span> <span class="fn">reply</span>(<span class="ty">String</span> userMessage);
+}
+
+<span class="cm">// 业务代码:如果用户只是打招呼,直接走死字符串回复,根本不打 LLM</span>
+<span class="ty">String</span> <span class="fn">handle</span>(<span class="ty">String</span> userInput) {
+    <span class="kw">if</span> (greetingExpert.<span class="fn">isGreeting</span>(userInput)) {
+        <span class="kw">return</span> <span class="st">"你好!有什么可以帮您?"</span>;  <span class="cm">// 零 LLM 成本</span>
+    }
+    <span class="kw">return</span> chatBot.<span class="fn">reply</span>(userInput);     <span class="cm">// 真要走 LLM + RAG</span>
+}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+  <div class="callout tip">
+    <p><strong>💡 价值</strong>:(1) 子服务可<strong>独立测试 / 独立评估</strong> (2) 子服务可<strong>独立调参数</strong>(打招呼 = 0.0 temperature,正式聊天 = 0.5) (3) 简单分支<strong>不走 LLM</strong>,省 token + 减延迟。</p>
+  </div>
+
+  <h2>9. 避坑指南</h2>
+
+  <div class="pitfall">
+    <h3>坑 1 · AiServices.create() 不能接 StreamingModel</h3>
+    <p><code>AiServices.create(Interface.class, streamingModel)</code> 会<strong>抛异常</strong>。要流式必须用 builder 模式:<code>AiServices.builder().streamingChatModel(...).build()</code>。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 2 · @MemoryId 同 ID 并发 = 数据损坏</h3>
+    <p>同一 <code>memoryId=1</code> 两个请求同时打进来,两个线程同时改 <code>List&lt;ChatMessage&gt;</code> = <strong>ConcurrentModificationException</strong>。要加锁 / 串行队列 / 线程隔离。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 3 · interface 方法名要语义化</h3>
+    <p>方法名会进 <code>finishReason</code> 和日志:<code>chat()</code> / <code>isPositive()</code> / <code>generateOutline()</code>。<strong>别用 <code>a() / b() / doIt()</code></strong> 这种没意义的名字,debug 时找不到问题。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 4 · 模板里忘写 {{it}} = 空白 prompt</h3>
+    <p><code>@UserMessage("Tell me a joke")</code> 不带 <code>{{it}}</code>,参数 userMessage 会被<strong>忽略</strong>。每次返回同一个笑话。检查:每个 @UserMessage 都要 <code>{{变量}}</code> 引用参数。</p>
+  </div>
+
+  <div class="pitfall">
+    <h3>坑 5 · 接口继承 ChatMemoryAccess 才能 evict</h3>
+    <p>用 <code>@MemoryId</code> 时,memory 越来越多会<strong>内存泄漏</strong>。要 evict 必须让 interface 继承 <code>ChatMemoryAccess</code>,然后调 <code>assistant.getChatMemory(id).clear()</code>。</p>
+  </div>
+
+  <h2>10. 记忆口诀</h2>
+  <div class="mnemonic">
+    <h3>🎓 4 行口诀</h3>
+    <pre>AI Services 是门面, interface 声明代理自动填
+六注解 System User V MemoryId Tool ToolMemoryId
+多用户靠 MemoryId, ChatMemoryProvider 隔离每个会话
+同 ID 不能并发, 子服务拆小可独立测</pre>
+  </div>
+
+  </div>
+</main>
+
+<footer>
+  <p>LangChain4j 基础篇 · ch05 v1 浅版 · 源:<code>AI Services _ LangChain4j.html</code>(1.7MB / 117 段)</p>
+</footer>
+
+<script>
+function copyCode(btn){
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='已复制';
+    setTimeout(()=>btn.textContent='复制', 1500);
+  });
+}
+</script>
+
+<script>
+if (location.search.includes('nav=1')) {
+  document.write('<style>.nav-top,.topnav{display:none !important;}.container,.main,.container-fluid{padding-top:24px !important;}</style>');
+}
+</script>
+</body>
+</html>
